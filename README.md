@@ -7,6 +7,8 @@ This is legacy code. There is a version in the works with significant hardware c
 
 It does however have the advantage of requiring very little hardware, so I am publishing this code here for those who wish to build the talking scale using software speech and to serve as an example that such a project can certainly be achieved. I still welcome contributions and will fix reported bugs.
 
+You can view a full change-log, instructions for the build and the current status of the project at [My Website](https://ashleycox.co.uk/projects/talking-stylus-tracking-force-scale/)
+
 #Libraries
 
 This code relies on the [talkie-fix](https://github.com/norberthidas/Talkie-FIX), [HX711](https://github.com/bogde/HX711), [EEPROMEx](https://github.com/thijse/Arduino-EEPROMEx) and [oneButton](https://github.com/mathertel/OneButton) libraries. 
