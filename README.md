@@ -48,6 +48,9 @@ Startup waits for sensor conversions and a stable empty-platform average;
 measurements and the menu become available after this initial zero. A broad
 range of individual samples can still produce a repeatable average, so startup
 checks movement between averaged blocks rather than the individual-sample range.
+This startup check uses sensor counts and background noise directly, independent
+of the saved calibration factor. An incorrect factor cannot lock out startup or
+the menu; correcting inaccurate weights still requires the 5 g calibration.
 
 For Arduino CLI, the included [build profiles](https://docs.arduino.cc/arduino-cli/sketch-project-file/)
 download the specified versions into isolated storage, avoiding conflicts with
@@ -98,7 +101,7 @@ button is still held. A short press outside the menu silences the old reading,
 then weighing resumes with a fresh reading. Startup zeroing must finish before
 entering the menu.
 
-To clear a suspect calibration when startup cannot finish, switch the scale off,
+To clear calibration and settings completely, switch the scale off,
 hold the button down, and switch it on again with the platform empty. Keep
 holding until it says "zero", then release. The five-second confirmation starts
 when the sketch runs, after any bootloader delay; erasing can take a few more
@@ -133,8 +136,9 @@ reset announcement history. The new words "control", "repeat", "change", and
 To tare, select "zero weight" and double click. The scale fills the filtered
 window and requires stability for another 500 ms before announcing "zero".
 If it cannot settle within 15 seconds, it announces "error" and keeps the old
-zero. Startup uses the same settling check and continues waiting after an
-error. Hold to leave the menu and resume weighing after a user-requested tare.
+zero. Startup also requires 500 ms of stability, but uses a factor-independent
+noise check. It continues waiting after an error if the platform is moving or
+the sensor is faulty. Hold to leave the menu after a user-requested tare.
 
 To calibrate:
 
@@ -213,7 +217,7 @@ Nano build sizes with the same AVR core and speech libraries:
 
 | Resource | Before direct button | Direct button only | Current software |
 | --- | ---: | ---: | ---: |
-| Flash | 14,172 bytes | 13,378 bytes | 24,984 bytes |
+| Flash | 14,172 bytes | 13,378 bytes | 25,446 bytes |
 | Static RAM | 545 bytes | 452 bytes | 1,043 bytes |
 
 The menu wraps back to "zero weight". Calibration is applied only after stable
@@ -232,7 +236,9 @@ These tests cover decimal speech, button debounce and gesture timing (including
 clock rollover), immediate speech interruption, menu cycling, calibration,
 announcement modes, sensor recovery, noisy startup and calibration, and operation
 with serial output unavailable. Startup reset tests cover confirmation, early
-release, full erasure, interrupted erasure, and failed writes. EEPROM tests
+release, full erasure, interrupted erasure, and failed writes. Startup tests
+also check that unrealistic saved factors cannot block startup or admit a moving
+zero, and that calibration can be corrected without an EEPROM reset. Storage tests
 simulate interrupted and silently failed writes at each affected byte. They
 complement the Nano compilation; they do not simulate the AVR audio interrupt,
 analogue noise, or load-cell accuracy. Compiler warnings from the current HX711
@@ -248,11 +254,15 @@ depends on the load cell, calibration, and mechanical setup.
 
 Weighing/tare stability compares four chronological five-sample block means
 within the rolling window, allowing at most 0.01 g of movement (with a two-count
-minimum). Calibration compares independent 20-sample means. These checks permit
-repeatable averages despite broader individual-sample noise. Before calibration,
-a provisional 4096-count mean-movement limit permits startup zeroing. The limits
-in `ScaleFilter.h` and `CalibrationCheck.h` should be checked against USB sample
-logs. The software never adjusts zero automatically.
+minimum). Calibration compares independent 20-sample means. Startup zeroing uses
+the four block means too, but sets its tolerance from background noise without
+using the saved factor. The second-smallest within-block range estimates noise;
+the tolerance is 1.5 times that range, with a two-count minimum and a 4096-count
+ceiling. One or two blocks containing a transient do not set the noise estimate.
+The normal 500 ms settling interval still applies. These checks permit
+repeatable averages despite broader individual-sample noise and reject sustained
+drift. The limits in `ScaleFilter.h` and `CalibrationCheck.h` should be checked
+against USB sample logs. Zero is not automatically adjusted during weighing.
 
 ## USB diagnostics
 

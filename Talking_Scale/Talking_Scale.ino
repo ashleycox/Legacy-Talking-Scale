@@ -453,7 +453,10 @@ void serviceScale(unsigned long now) {
 
   if (operation == STARTUP_ZERO || operation == USER_ZERO || operation == WEIGHING) {
     readingFilter.add(static_cast<int32_t>(raw), static_cast<uint32_t>(now));
-    readingStable = readingFilter.stable(scale.get_scale(), calibrated);
+    // Startup must be able to reach calibration even when the saved factor is
+    // wrong. Judge its empty-platform zero directly in ADC counts instead.
+    readingStable = operation == STARTUP_ZERO
+        ? readingFilter.stableZero() : readingFilter.stable(scale.get_scale(), calibrated);
     if (!readingStable) stableWindow = false;
     else if (!stableWindow) {
       stableWindow = true;

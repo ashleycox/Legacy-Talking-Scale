@@ -287,6 +287,79 @@ void testNoisyStartup() {
   assert(EEPROM.putCalls == 0 && EEPROM.bytes == storedBytes);
 }
 
+void testStartupWithUnrealisticFactor(float factor) {
+  assert(calibrationStore.save(factor));
+  const auto storedBytes = EEPROM.bytes;
+  const unsigned int writes = EEPROM.changedBytes;
+  setup();
+  for (unsigned int i = 0; operation == STARTUP_ZERO && i < 100; ++i) {
+    scale.raw = 1000 + ((i % 2) ? 20 : -20);
+    advance(100);
+  }
+  // A saved factor cannot change whether the same empty-platform samples settle.
+  assert(operation == WEIGHING && !sensorFault && !zeroTimeoutReported);
+  assert(calibrated && scale.get_offset() == 1000 && scale.get_scale() == factor);
+  assert(EEPROM.bytes == storedBytes && EEPROM.changedBytes == writes);
+  enterMenu();
+  assert(operation == WEIGHING && calibrated);
+  assert(EEPROM.bytes == storedBytes && EEPROM.changedBytes == writes);
+}
+
+void testMovingStartupWithLargeFactor() {
+  assert(calibrationStore.save(1.0e20f));
+  const auto storedBytes = EEPROM.bytes;
+  setup();
+  for (unsigned int i = 0; i < 200; ++i) {
+    scale.raw = 1000 + static_cast<long>(i) * 4;
+    advance(100);
+    // This drift is well below the old uncalibrated 4096-count allowance, but
+    // zero must not be captured while the platform continues moving.
+    assert(operation == STARTUP_ZERO && scale.get_offset() == 0);
+    assert(!readingAvailable && !sensorFault);
+  }
+  assert(zeroTimeoutReported && EEPROM.bytes == storedBytes);
+  scale.raw = 2000;
+  until([] { return operation == WEIGHING; });
+  assert(calibrated && scale.get_offset() == 2000);
+  assert(scale.get_scale() == 1.0e20f && EEPROM.bytes == storedBytes);
+}
+
+void testStartupFaultWithUnrealisticFactor(bool clipped) {
+  assert(calibrationStore.save(1.0e20f));
+  const auto storedBytes = EEPROM.bytes;
+  scale.raw = clipped ? 8388607L : 1000;
+  scale.connected = clipped;
+  setup();
+  advance(SENSOR_TIMEOUT_MS + 1000);
+  assert(operation == STARTUP_ZERO && sensorFault && scale.get_offset() == 0);
+  assert(!readingAvailable && EEPROM.bytes == storedBytes);
+  scale.connected = true;
+  scale.raw = 1000;
+  until([] { return operation == WEIGHING; });
+  assert(!sensorFault && calibrated && scale.get_offset() == 1000);
+  assert(scale.get_scale() == 1.0e20f && EEPROM.bytes == storedBytes);
+}
+
+void testRecalibrateAfterUnrealisticStartupFactor() {
+  const float originalFactor = 1.0e-20f;
+  assert(calibrationStore.save(originalFactor));
+  setup();
+  for (unsigned int i = 0; operation == STARTUP_ZERO && i < 100; ++i) {
+    scale.raw = 1000 + ((i % 2) ? 20 : -20);
+    advance(100);
+  }
+  assert(operation == WEIGHING && calibrated && scale.get_scale() == originalFactor);
+  beginCalibration();
+  waitForPlacement();
+  scale.raw = 11500;
+  until([] { return operation == WEIGHING; });
+  assert(calibrated && !menu && calibrationStatus == CalibrationStatus::Saved);
+  assert(scale.get_offset() == 1500 && scale.get_scale() == 2000.0f);
+  float stored;
+  assert(calibrationStore.load(stored) && stored == 2000.0f);
+  assert(EEPROM.bytes[8] == 0xa5 && EEPROM.bytes[9] == 0xff); // No factory reset.
+}
+
 void testStandaloneOperation() {
   // Even a permanently full UART transmit buffer must not hold up the scale.
   serialTxBlocked = true;
@@ -760,6 +833,14 @@ int main(int argc, char **argv) {
   else if (std::strcmp(scenario, "calibration-timeout") == 0) testCalibrationFailure(true);
   else if (std::strcmp(scenario, "startup-timeout") == 0) testStartupTimeout();
   else if (std::strcmp(scenario, "startup-jitter") == 0) testNoisyStartup();
+  else if (std::strcmp(scenario, "startup-factor-small") == 0) testStartupWithUnrealisticFactor(1.0e-20f);
+  else if (std::strcmp(scenario, "startup-factor-small-negative") == 0) testStartupWithUnrealisticFactor(-1.0e-20f);
+  else if (std::strcmp(scenario, "startup-factor-large") == 0) testStartupWithUnrealisticFactor(1.0e20f);
+  else if (std::strcmp(scenario, "startup-factor-large-negative") == 0) testStartupWithUnrealisticFactor(-1.0e20f);
+  else if (std::strcmp(scenario, "startup-moving-large-factor") == 0) testMovingStartupWithLargeFactor();
+  else if (std::strcmp(scenario, "startup-clipped-large-factor") == 0) testStartupFaultWithUnrealisticFactor(true);
+  else if (std::strcmp(scenario, "startup-missing-large-factor") == 0) testStartupFaultWithUnrealisticFactor(false);
+  else if (std::strcmp(scenario, "startup-recalibrate") == 0) testRecalibrateAfterUnrealisticStartupFactor();
   else if (std::strcmp(scenario, "standalone") == 0) testStandaloneOperation();
   else if (std::strcmp(scenario, "sensor-recovery") == 0) testSensorRecovery();
   else if (std::strcmp(scenario, "fault-menu-exit") == 0) testFaultedMenuExit();

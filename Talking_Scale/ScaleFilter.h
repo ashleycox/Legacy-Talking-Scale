@@ -54,26 +54,31 @@ public:
   }
 
   uint32_t meanSpread() const {
-    if (!ready()) return 0;
-    int32_t minimum = 0;
-    int32_t maximum = 0;
-    // nextSample identifies the oldest value once the ring is full. Grouping
-    // physical array slots would mix the ends of the time window after wrap.
-    uint8_t index = nextSample;
-    for (uint8_t block = 0; block < 4; ++block) {
-      int32_t blockSum = 0;
-      for (uint8_t sample = 0; sample < 5; ++sample) {
-        blockSum += samples[index]; // Five signed 24-bit values fit in int32_t.
-        if (++index == WINDOW_SAMPLES) index = 0;
+    return blockStatistics(0);
+  }
+
+  bool stableZero() const {
+    if (!ready()) return false;
+    uint32_t ranges[4];
+    const uint32_t movement = blockStatistics(ranges);
+    for (uint8_t i = 1; i < 4; ++i) {
+      const uint32_t value = ranges[i];
+      uint8_t j = i;
+      while (j > 0 && ranges[j - 1] > value) {
+        ranges[j] = ranges[j - 1];
+        --j;
       }
-      const int32_t blockMean = blockSum / 5;
-      if (block == 0) minimum = maximum = blockMean;
-      else {
-        if (blockMean < minimum) minimum = blockMean;
-        if (blockMean > maximum) maximum = blockMean;
-      }
+      ranges[j] = value;
     }
-    return static_cast<uint32_t>(maximum - minimum);
+    // The lower middle of four within-block ranges estimates background noise.
+    // An excursion confined to one or two blocks does not set this estimate.
+    // No saved calibration is involved.
+    uint32_t maximumMovement = ranges[1] + ranges[1] / 2;
+    if (maximumMovement < 2) maximumMovement = 2;
+    if (maximumMovement > UNCALIBRATED_MAX_SPREAD) {
+      maximumMovement = UNCALIBRATED_MAX_SPREAD;
+    }
+    return movement <= maximumMovement;
   }
 
   bool stable(float factor, bool calibrated) const {
@@ -95,6 +100,37 @@ public:
   uint32_t lastSampleAt() const { return sampleAt; }
 
 private:
+  uint32_t blockStatistics(uint32_t *ranges) const {
+    if (!ready()) return 0;
+    int32_t minimum = 0;
+    int32_t maximum = 0;
+    // nextSample identifies the oldest value once the ring is full. Grouping
+    // physical array slots would mix the ends of the time window after wrap.
+    uint8_t index = nextSample;
+    for (uint8_t block = 0; block < 4; ++block) {
+      int32_t blockSum = 0;
+      int32_t low = samples[index];
+      int32_t high = low;
+      for (uint8_t sample = 0; sample < 5; ++sample) {
+        const int32_t value = samples[index];
+        blockSum += value; // Five signed 24-bit values fit in int32_t.
+        if (ranges) {
+          if (value < low) low = value;
+          if (value > high) high = value;
+        }
+        if (++index == WINDOW_SAMPLES) index = 0;
+      }
+      if (ranges) ranges[block] = static_cast<uint32_t>(high - low);
+      const int32_t blockMean = blockSum / 5;
+      if (block == 0) minimum = maximum = blockMean;
+      else {
+        if (blockMean < minimum) minimum = blockMean;
+        if (blockMean > maximum) maximum = blockMean;
+      }
+    }
+    return static_cast<uint32_t>(maximum - minimum);
+  }
+
   static int32_t median(int32_t a, int32_t b, int32_t c) {
     if (a > b) { const int32_t saved = a; a = b; b = saved; }
     if (b > c) { const int32_t saved = b; b = c; c = saved; }

@@ -13,6 +13,7 @@ void testPrimingAndReset() {
   assert(filter.mean() == 0 && filter.spread() == 0 && filter.meanSpread() == 0);
   assert(filter.latestRaw() == 0 && filter.lastSampleAt() == 0);
   assert(!filter.stable(1000.0f, true));
+  assert(!filter.stableZero());
   filter.add(1000, 10);
   filter.add(1000, 110);
   assert(filter.count() == 0);
@@ -23,6 +24,7 @@ void testPrimingAndReset() {
   assert(filter.mean() == 1000 && filter.spread() == 0);
   assert(filter.latestRaw() == 1000 && filter.lastSampleAt() == 2110);
   assert(filter.stable(1000.0f, true));
+  assert(filter.stableZero());
   filter.reset();
   assert(!filter.ready() && filter.count() == 0);
   assert(filter.mean() == 0 && filter.spread() == 0 && filter.meanSpread() == 0);
@@ -56,10 +58,14 @@ void testStepAndContinuousUpdates() {
     // The median introduces one conversion of delay, then each new conversion
     // replaces one old value instead of waiting for another twenty-value batch.
     assert(filter.mean() == static_cast<int32_t>((i - 1) * 50));
-    if (i > 1 && i < 21) assert(!filter.stable(1000.0f, true));
+    if (i > 1 && i < 21) {
+      assert(!filter.stable(1000.0f, true));
+      assert(!filter.stableZero());
+    }
   }
   assert(filter.mean() == 1000 && filter.spread() == 0);
   assert(filter.stable(-1000.0f, true));
+  assert(filter.stableZero());
 
   ScaleFilter ramp;
   for (uint32_t i = 0; i < 22; ++i) ramp.add(i, i * 100);
@@ -109,6 +115,9 @@ void testRepeatableJitter() {
       assert(filter.meanSpread() == 8);
       assert(filter.stable(2000.0f, true));
       assert(filter.stable(-2000.0f, true));
+      assert(filter.stableZero());
+      // Normal weighing and user tare retain their gram-based tolerance.
+      assert(!filter.stable(1.0e-20f, true));
     }
   }
 }
@@ -122,7 +131,46 @@ void testChronologicalBlockMeans() {
     // The oldest-to-newest grouping stays correct at every ring offset.
     assert(filter.meanSpread() == 15);
     assert(!filter.stable(1000.0f, true));
+    assert(!filter.stableZero());
   }
+}
+
+void testStartupExcursions() {
+  // Two adjacent excursions survive a median of three. Their transient must
+  // not be mistaken for a settled zero, including across block/ring boundaries.
+  const int32_t amplitudes[] = {100, -100, 5000, -5000};
+  for (int32_t amplitude : amplitudes) {
+    for (uint8_t position = 0; position < 19; ++position) {
+      ScaleFilter filter;
+      fill(filter, 1000);
+      for (uint8_t i = 0; i < 20; ++i) {
+        filter.add(1000 + (i == position || i == position + 1 ? amplitude : 0),
+                   2200 + i * 100);
+      }
+      assert(filter.mean() != 1000);
+      assert(!filter.stableZero());
+      fill(filter, 1000, 4200);
+      assert(filter.mean() == 1000 && filter.stableZero());
+    }
+  }
+
+  // Reproducible but extreme noise must not expand the startup tolerance
+  // without limit just because its full-window mean happens to repeat.
+  ScaleFilter noisy;
+  for (uint8_t i = 0; i < 100; ++i) {
+    noisy.add(i % 2 ? 1000000 : -1000000, i * 100);
+    if (noisy.ready()) assert(!noisy.stableZero());
+  }
+}
+
+void testStartupBackgroundNoise() {
+  ScaleFilter filter;
+  const int32_t offsets[] = {0, 20, -10, 15, -20, 5, 10, -15, 0, 8};
+  for (uint8_t i = 0; i < 80; ++i) {
+    filter.add(1000 + offsets[i % 10], i * 100);
+    if (filter.ready()) assert(filter.stableZero());
+  }
+  assert(filter.mean() == 1002);
 }
 
 void testFullScaleInputsAndTimestampRollover() {
@@ -149,6 +197,8 @@ int main() {
   testStabilityAndSmallChanges();
   testRepeatableJitter();
   testChronologicalBlockMeans();
+  testStartupExcursions();
+  testStartupBackgroundNoise();
   testFullScaleInputsAndTimestampRollover();
   puts("Filter tests passed.");
 }

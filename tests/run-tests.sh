@@ -68,6 +68,9 @@ for scenario in speech button-menu calibration calibration-negative \
   phrase-bound calibration-noise late-cancel unstable-tare modes clipping \
   clip-request console repeat-gap gap-button calibration-jitter calibration-details \
   calibration-fault-speech reset-confirm reset-cancel reset-resume reset-failure \
-  reset-marker-failure reset-latepress; do
+  reset-marker-failure reset-latepress startup-factor-small \
+  startup-factor-small-negative startup-factor-large startup-factor-large-negative \
+  startup-moving-large-factor startup-clipped-large-factor startup-missing-large-factor \
+  startup-recalibrate; do
   "$build_dir/sketch-test" "$scenario"
 done
