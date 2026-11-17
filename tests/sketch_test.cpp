@@ -34,7 +34,7 @@ void advance(unsigned long duration) {
 }
 
 template <typename Condition>
-void until(Condition complete, unsigned long timeout = 10000) {
+void until(Condition complete, unsigned long timeout = 30000) {
   const unsigned long start = millis();
   while (!complete() && millis() - start < timeout) advance(1);
   assert(complete());
@@ -352,6 +352,30 @@ void testPhraseBound() {
   }
 }
 
+void testCalibrationRejectsNoise() {
+  boot();
+  beginCalibration();
+  waitForPlacement();
+  scale.raw = 1501; // One raw count of unloaded drift must not become a calibration.
+  until([] { return operation == WEIGHING; });
+  assert(menu && menuOption == CALIBRATE);
+  assertOldCalibration();
+}
+
+void testLateCalibrationCancel() {
+  boot();
+  beginCalibration();
+  waitForPlacement();
+  scale.raw = 11500;
+  until([] { return operation == CALIBRATION_READ && sampleCount >= 18; });
+  testButtonLevel = LOW;
+  advance(1050);
+  assert(operation == WEIGHING && !menu);
+  assertOldCalibration();
+  testButtonLevel = HIGH;
+  advance(50);
+}
+
 int main(int argc, char **argv) {
   assert(argc == 2);
   const char *scenario = argv[1];
@@ -367,6 +391,8 @@ int main(int argc, char **argv) {
   else if (std::strcmp(scenario, "fault-menu-exit") == 0) testFaultedMenuExit();
   else if (std::strcmp(scenario, "interrupt") == 0) testSpeechInterruption();
   else if (std::strcmp(scenario, "interrupt-calibration") == 0) testInterruptedCalibrationPrompt();
+  else if (std::strcmp(scenario, "calibration-noise") == 0) testCalibrationRejectsNoise();
+  else if (std::strcmp(scenario, "late-cancel") == 0) testLateCalibrationCancel();
   else if (std::strcmp(scenario, "phrase-bound") == 0) testPhraseBound();
   else testInvalidEEPROM(scenario);
   std::printf("Sketch test passed: %s\n", scenario);

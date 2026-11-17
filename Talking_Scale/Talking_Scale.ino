@@ -13,6 +13,7 @@
 #include <util/atomic.h>
 #include "ScaleButton.h"
 #include "ScaleReading.h"
+#include "CalibrationCheck.h"
 
 #if !defined(__AVR_ATmega328P__) || F_CPU != 16000000UL
 #error This sketch requires a 16 MHz ATmega328P Nano or Uno with speech on D3.
@@ -26,6 +27,7 @@ const uint8_t ZERO_SAMPLES = 10;
 const float CALIBRATION_WEIGHT_GRAMS = 5.0f;
 const unsigned long WEIGHT_PLACEMENT_MS = 2000;
 const unsigned long SENSOR_TIMEOUT_MS = 3000;
+const unsigned long CALIBRATION_TIMEOUT_MS = 15000;
 const int CALIBRATION_ADDRESS = 0; // Retains the legacy EEPROM float layout.
 
 // Talkie owns timers 1 and 2. Timer 0 supplies millis() for button timing.
@@ -44,7 +46,7 @@ bool restartCalibrationPrompt = false;
 
 enum Operation {
   STARTUP_ZERO, WEIGHING, USER_ZERO, CALIBRATION_ZERO,
-  CALIBRATION_PROMPT, CALIBRATION_WAIT, CALIBRATION_READ
+  CALIBRATION_PROMPT, CALIBRATION_WAIT, CALIBRATION_READ, CALIBRATION_COMMIT
 };
 enum MenuOption { NO_SELECTION, ZERO_WEIGHT, CALIBRATE };
 Operation operation = STARTUP_ZERO;
@@ -57,6 +59,12 @@ float latestReading = 0.0f;
 long sampleSum = 0;
 uint8_t sampleCount = 0;
 long calibrationZero = 0;
+uint32_t calibrationZeroSpread = 0;
+uint32_t batchSpread = 0;
+long sampleMinimum = 0;
+long sampleMaximum = 0;
+float candidateCalibration = 0.0f;
+unsigned long operationStartedAt = 0;
 unsigned long placementStartedAt = 0;
 unsigned long lastSampleAt = 0;
 
@@ -193,7 +201,7 @@ void queueReading(float grams) {
 }
 
 bool validCalibration(float factor) {
-  return isfinite(factor) && factor != 0.0f;
+  return validCalibrationFactor(factor);
 }
 
 void resetSamples() {
@@ -218,6 +226,7 @@ void beginOperation(Operation next) {
   startPhrase();
   resetSamples();
   operation = next;
+  operationStartedAt = millis();
 }
 
 void calibrationFailed() {
@@ -249,7 +258,10 @@ void finishAverage(long average) {
       queueWord(spZERO);
       break;
     case CALIBRATION_ZERO:
+      if (!stableCalibrationWindow({static_cast<int32_t>(average), batchSpread},
+                                   scale.get_scale(), calibrated)) break;
       calibrationZero = average;
+      calibrationZeroSpread = batchSpread;
       operation = CALIBRATION_PROMPT;
       restartCalibrationPrompt = false;
       startPhrase();
@@ -257,22 +269,13 @@ void finishAverage(long average) {
       queueNumber(static_cast<uint32_t>(CALIBRATION_WEIGHT_GRAMS));
       break;
     case CALIBRATION_READ: {
-      const float factor = (average - calibrationZero) / CALIBRATION_WEIGHT_GRAMS;
-      if (!validCalibration(factor)) {
-        calibrationFailed();
-        break;
+      const SampleSummary baseline = {static_cast<int32_t>(calibrationZero), calibrationZeroSpread};
+      const SampleSummary loaded = {static_cast<int32_t>(average), batchSpread};
+      if (calibrationCandidate(baseline, loaded, CALIBRATION_WEIGHT_GRAMS,
+                               candidateCalibration)) {
+        // The commit runs separately so an unresolved cancellation gesture wins.
+        operation = CALIBRATION_COMMIT;
       }
-      scale.set_offset(calibrationZero);
-      scale.set_scale(factor);
-      EEPROM.put(CALIBRATION_ADDRESS, factor); // Updates changed bytes only.
-      calibrated = true;
-      menu = false;
-      operation = WEIGHING;
-      startPhrase();
-      queueWord(spWEIGHT);
-      queueNumber(static_cast<uint32_t>(CALIBRATION_WEIGHT_GRAMS));
-      Serial.print(F("Calibration factor: "));
-      Serial.println(factor, 6);
       break;
     }
     case WEIGHING:
@@ -286,6 +289,26 @@ void finishAverage(long average) {
 }
 
 void serviceOperation(unsigned long now) {
+  if ((operation == CALIBRATION_ZERO || operation == CALIBRATION_READ) &&
+      now - operationStartedAt >= CALIBRATION_TIMEOUT_MS) {
+    calibrationFailed();
+    return;
+  }
+  if (operation == CALIBRATION_COMMIT && !button.busy() && !speechPaused) {
+    scale.set_offset(calibrationZero);
+    scale.set_scale(candidateCalibration);
+    EEPROM.put(CALIBRATION_ADDRESS, candidateCalibration);
+    calibrated = true;
+    menu = false;
+    operation = WEIGHING;
+    resetSamples();
+    startPhrase();
+    queueWord(spWEIGHT);
+    queueNumber(static_cast<uint32_t>(CALIBRATION_WEIGHT_GRAMS));
+    Serial.print(F("Calibration factor: "));
+    Serial.println(candidateCalibration, 6);
+  }
+
   if (operation == CALIBRATION_PROMPT) {
     if (speechPaused || button.busy()) return;
     if (restartCalibrationPrompt) {
@@ -302,6 +325,7 @@ void serviceOperation(unsigned long now) {
              now - placementStartedAt >= WEIGHT_PLACEMENT_MS) {
     resetSamples();
     operation = CALIBRATION_READ;
+    operationStartedAt = now;
   }
 }
 
@@ -331,14 +355,19 @@ void serviceScale(unsigned long now) {
 
   // Drain conversions during prompts/placement so calibration starts with fresh data.
   if (operation == CALIBRATION_PROMPT || operation == CALIBRATION_WAIT ||
+      operation == CALIBRATION_COMMIT ||
       (operation == WEIGHING && (menu || !calibrated))) return;
 
+  if (sampleCount == 0) sampleMinimum = sampleMaximum = raw;
+  if (raw < sampleMinimum) sampleMinimum = raw;
+  if (raw > sampleMaximum) sampleMaximum = raw;
   sampleSum += raw; // 20 signed 24-bit conversions fit in a signed 32-bit long.
   ++sampleCount;
   const uint8_t target = (operation == STARTUP_ZERO || operation == USER_ZERO ||
                           operation == CALIBRATION_ZERO) ? ZERO_SAMPLES : READING_SAMPLES;
   if (sampleCount == target) {
     const long average = sampleSum / sampleCount;
+    batchSpread = static_cast<uint32_t>(sampleMaximum - sampleMinimum);
     sampleSum = 0;
     sampleCount = 0;
     finishAverage(average);

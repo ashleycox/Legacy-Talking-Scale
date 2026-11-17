@@ -102,9 +102,14 @@ A one-second hold cancels calibration as usual.
 
 When startup has already selected calibration after "error calibrate", double
 click to start it. A cancelled, zero-result, or interrupted calibration leaves
-the previous factor and offset intact. A negative factor is valid when load-cell
-polarity is reversed. The routine assumes the correct reference weight was
-placed; it cannot identify a wrong or missing weight from noisy readings alone.
+the previous factor and offset intact. Empty and loaded windows must be stable,
+and the loaded signal must exceed both 32 raw counts and ten times either
+window's noise spread. Each collection phase allows up to 15 seconds for a
+valid window. A pending button gesture delays the save so a cancellation hold
+can finish first. These thresholds are configurable in `CalibrationCheck.h` and
+need checking against the actual scale. A negative factor is valid when
+load-cell polarity is reversed. The correct 5 g reference must still be used;
+the routine cannot identify an incorrect reference weight.
 
 If the HX711 stops providing conversions for three seconds, the scale announces
 "error", stops reporting measurements, and keeps polling the button and sensor.
