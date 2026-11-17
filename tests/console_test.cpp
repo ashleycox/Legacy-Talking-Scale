@@ -15,6 +15,7 @@ ConsoleCommand command(DiagnosticConsole &console, const std::string &text) {
 int main() {
   DiagnosticConsole console;
   assert(command(console, "status\r\n") == ConsoleCommand::Status);
+  assert(command(console, "calibration\n") == ConsoleCommand::Calibration);
   assert(command(console, "raw\n") == ConsoleCommand::Raw);
   assert(command(console, "help\n") == ConsoleCommand::Help);
   assert(command(console, "stream on\n") == ConsoleCommand::StreamOn);

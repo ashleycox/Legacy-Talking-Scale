@@ -53,6 +53,29 @@ public:
     return static_cast<uint32_t>(maximum - minimum);
   }
 
+  uint32_t meanSpread() const {
+    if (!ready()) return 0;
+    int32_t minimum = 0;
+    int32_t maximum = 0;
+    // nextSample identifies the oldest value once the ring is full. Grouping
+    // physical array slots would mix the ends of the time window after wrap.
+    uint8_t index = nextSample;
+    for (uint8_t block = 0; block < 4; ++block) {
+      int32_t blockSum = 0;
+      for (uint8_t sample = 0; sample < 5; ++sample) {
+        blockSum += samples[index]; // Five signed 24-bit values fit in int32_t.
+        if (++index == WINDOW_SAMPLES) index = 0;
+      }
+      const int32_t blockMean = blockSum / 5;
+      if (block == 0) minimum = maximum = blockMean;
+      else {
+        if (blockMean < minimum) minimum = blockMean;
+        if (blockMean > maximum) maximum = blockMean;
+      }
+    }
+    return static_cast<uint32_t>(maximum - minimum);
+  }
+
   bool stable(float factor, bool calibrated) const {
     if (!ready()) return false;
     float maximumSpread = UNCALIBRATED_MAX_SPREAD;
@@ -61,7 +84,9 @@ public:
       maximumSpread = fabsf(factor) * 0.01f;
       if (maximumSpread < 2.0f) maximumSpread = 2.0f;
     }
-    return static_cast<float>(spread()) <= maximumSpread;
+    // Judge movement between short averaged blocks, not every noisy ADC sample.
+    // spread() remains available as the unaveraged filtered-noise diagnostic.
+    return static_cast<float>(meanSpread()) <= maximumSpread;
   }
 
   int32_t latestRaw() const {

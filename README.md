@@ -43,6 +43,12 @@ For the Arduino IDE, move the old bundled libraries out of the sketchbook's
 processor/bootloader, then verify and upload. Many older Nano clones need
 **ATmega328P (Old Bootloader)**. Keep the platform empty during startup.
 
+Battery operation does not require a USB connection or an open serial monitor.
+Startup waits for sensor conversions and a stable empty-platform average;
+measurements and the menu become available after this initial zero. A broad
+range of individual samples can still produce a repeatable average, so startup
+checks movement between averaged blocks rather than the individual-sample range.
+
 For Arduino CLI, the included [build profiles](https://docs.arduino.cc/arduino-cli/sketch-project-file/)
 download the specified versions into isolated storage, avoiding conflicts with
 other installed libraries. Run from the repository root:
@@ -58,7 +64,8 @@ profile and supply the board's serial port, for example:
 arduino-cli upload --profile nano_old --port /dev/cu.usbserial-XXXX Talking_Scale
 ```
 
-Serial diagnostics use 9600 baud. An existing four-byte calibration float at EEPROM address 0 is imported once
+Serial diagnostics use 9600 baud. An existing four-byte calibration float at
+EEPROM address 0 is imported once
 into two alternating, versioned records with CRC16 checksums. Each save commits
 the new record last, preserving the previous record if power fails mid-write.
 The old float is retained, but is never used as a fallback after journal
@@ -110,13 +117,17 @@ reset announcement history. The new words "control", "repeat", "change", and
 To tare, select "zero weight" and double click. The scale fills the filtered
 window and requires stability for another 500 ms before announcing "zero".
 If it cannot settle within 15 seconds, it announces "error" and keeps the old
-zero. Startup uses the same settling check and continues waiting after an error. Hold to leave the menu and resume weighing.
+zero. Startup uses the same settling check and continues waiting after an
+error. Hold to leave the menu and resume weighing after a user-requested tare.
 
 To calibrate:
 
 1. Empty the platform, enter the menu, select "calibrate", and double click.
+   Keep it empty until "put five"; baseline collection takes about four seconds
+   on a 10-sample-per-second HX711 module.
 2. Wait for "put five". After the prompt finishes, there are two seconds to place
-   the 5 g reference weight. Leave it still while 20 conversions are averaged.
+   the 5 g reference weight. Leave it still while two sets of 20 filtered
+   readings are compared (about four more seconds at 10 samples per second).
 3. "Weight five" confirms that the factor was saved. Remove the reference weight
    before weighing another item.
 
@@ -126,14 +137,23 @@ A one-second hold cancels calibration as usual.
 
 When startup has already selected calibration after "error calibrate", double
 click to start it. A cancelled, zero-result, or interrupted calibration leaves
-the previous factor and offset intact. Empty and loaded windows must be stable,
-and the loaded signal must exceed both 32 raw counts and ten times either
-window's noise spread. Each collection phase allows up to 15 seconds for a
-valid window. A pending button gesture delays the save so a cancellation hold
-can finish first. These thresholds are configurable in `CalibrationCheck.h` and
-need checking against the actual scale. A negative factor is valid when
-load-cell polarity is reversed. The correct 5 g reference must still be used;
-the routine cannot identify an incorrect reference weight.
+the previous factor and offset intact. Calibration compares the repeatability
+of independent, median-filtered averages rather than requiring every raw sample
+to fit within 0.01 g. The empty baseline does not depend on the old factor.
+The reference signal must exceed both 32 raw counts and ten times the filtered
+noise range; the baseline and loaded means must repeat within 0.01 g under the
+candidate factor. Each collection phase allows up to 15 seconds. A pending
+button gesture delays the save so a cancellation hold can finish first.
+
+Failure says "calibrate fail" and returns to the calibration menu item. The
+original ERROR sample is a short vowel-heavy word; FAIL is a clearer matching
+VM61002 sample. Sensor recovery waits for a pending notification to finish,
+rather than interrupting it with "ready". The `calibration` USB command reports
+whether the last attempt lacked a signal, had a moving baseline or weight,
+encountered a sensor fault, or failed to save. A baseline that proves unstable
+under the candidate factor fails promptly so it can be remeasured empty.
+A negative factor remains valid for reversed load-cell polarity, and the correct
+5 g reference must still be used; software cannot identify an incorrect weight.
 
 If the HX711 stops providing conversions for three seconds, the scale announces
 "error", stops reporting measurements, and keeps polling the button and sensor.
@@ -177,8 +197,8 @@ Nano build sizes with the same AVR core and speech libraries:
 
 | Resource | Before direct button | Direct button only | Current software |
 | --- | ---: | ---: | ---: |
-| Flash | 14,172 bytes | 13,378 bytes | 21,650 bytes |
-| Static RAM | 545 bytes | 452 bytes | 937 bytes |
+| Flash | 14,172 bytes | 13,378 bytes | 24,260 bytes |
+| Static RAM | 545 bytes | 452 bytes | 1,026 bytes |
 
 The menu wraps back to "zero weight". Calibration is applied only after stable
 measurements and verified EEPROM writes. Journal records use byte updates,
@@ -194,7 +214,8 @@ This requires a C++11 compiler and no installed Arduino libraries.
 
 These tests cover decimal speech, button debounce and gesture timing (including
 clock rollover), immediate speech interruption, menu cycling, calibration,
-announcement modes, sensor recovery, and serial backpressure. EEPROM tests
+announcement modes, sensor recovery, noisy startup and calibration, and operation
+with serial output unavailable. EEPROM tests
 simulate interrupted and silently failed writes at each affected byte. They
 complement the Nano compilation; they do not simulate the AVR audio interrupt,
 analogue noise, or load-cell accuracy. Compiler warnings from the current HX711
@@ -208,11 +229,13 @@ and a negative reading, and power-cycle to confirm the calibration is retained.
 Speaking hundredths does not establish 0.01 g physical accuracy; that also
 depends on the load cell, calibration, and mechanical setup.
 
-Stability uses a full-window spread of at most 0.01 g (with a two-count minimum).
-Before calibration, a provisional 4096-count limit permits initial zeroing;
-calibration then checks both windows against the measured calibration factor. The limits in `ScaleFilter.h` and `CalibrationCheck.h` should be
-checked against USB sample logs. The software never adjusts zero automatically.
-
+Weighing/tare stability compares four chronological five-sample block means
+within the rolling window, allowing at most 0.01 g of movement (with a two-count
+minimum). Calibration compares independent 20-sample means. These checks permit
+repeatable averages despite broader individual-sample noise. Before calibration,
+a provisional 4096-count mean-movement limit permits startup zeroing. The limits
+in `ScaleFilter.h` and `CalibrationCheck.h` should be checked against USB sample
+logs. The software never adjusts zero automatically.
 
 ## USB diagnostics
 
@@ -223,11 +246,13 @@ newline (CRLF is also accepted):
 | --- | --- |
 | `help` | List commands |
 | `status` or `raw` | One diagnostic snapshot |
+| `calibration` | Last calibration status, noise ranges and movement of averaged readings |
 | `stream on` | Enable snapshots at up to 5 Hz |
 | `stream off` | Stop streaming and return a final snapshot |
 
 Snapshots contain `raw`, filtered `mean`, grams (`g`), filtered peak-to-peak noise
-(`spread`, raw counts), `stable`, zero offset (`zero`), `net` counts after zero,
+(`spread`, raw counts), averaged-block movement (`motion`), `stable`, zero offset
+(`zero`), `net` counts after zero,
 calibration `factor`, measurement validity (`valid`), operation (`op`), sensor
 `fault`, speech `mode`, and sample age (`age`, milliseconds). Grams are `na` when
 there is no valid weighing window. `net` shows zero drift only while the platform
@@ -243,3 +268,11 @@ not every ADC conversion. Input processing and output draining are bounded per
 loop; a full output buffer cannot block the button, speech or sensor polling.
 Requests may be coalesced while output is busy. Oversized and unknown commands
 are rejected, and all buffers have fixed sizes.
+
+During calibration (including its failure menu), streaming alternates normal
+snapshots with `cal=` records. These report a readable status, `timedout`,
+operation `op`, latest `raw`, current-window sample count `n`, empty mean `base`,
+empty filtered noise span `bs`, movement between empty means `bm`, reference mean
+`load`, reference noise span `ls`, movement between loaded means `lm`, and the
+tentative `candidate` factor. All spans and movements are in ADC counts. A
+candidate is not applied or saved until validation and EEPROM readback pass.

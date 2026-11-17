@@ -48,12 +48,17 @@ compiler=${CXX:-c++}
   "$test_dir/playback_test.cpp" -o "$build_dir/playback-test"
 "$build_dir/playback-test"
 
+"$compiler" -std=c++11 -Wall -Wextra -Werror -pedantic \
+  -I "$test_dir/stubs" "$test_dir/lpc_playback_test.cpp" -o "$build_dir/lpc-playback-test"
+"$build_dir/lpc-playback-test"
+
 # Each invocation starts the actual sketch's globals from a fresh boot.
 for scenario in speech button-menu calibration calibration-negative \
   cancel-zero cancel-prompt cancel-wait cancel-read calibration-failure \
   calibration-timeout erased-eeprom zero-factor nan-factor infinity-factor \
-  startup-timeout sensor-recovery fault-menu-exit interrupt interrupt-calibration \
+  startup-timeout startup-jitter standalone sensor-recovery fault-menu-exit interrupt interrupt-calibration \
   phrase-bound calibration-noise late-cancel unstable-tare modes clipping \
-  clip-request console repeat-gap gap-button; do
+  clip-request console repeat-gap gap-button calibration-jitter calibration-details \
+  calibration-fault-speech; do
   "$build_dir/sketch-test" "$scenario"
 done

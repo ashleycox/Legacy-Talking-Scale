@@ -4,7 +4,7 @@
 #include <Arduino.h>
 #include <string.h>
 
-enum class ConsoleCommand : uint8_t { None, Help, Status, Raw, StreamOn, StreamOff, Invalid };
+enum class ConsoleCommand : uint8_t { None, Help, Status, Raw, Calibration, StreamOn, StreamOff, Invalid };
 
 // Fixed buffers and a bounded drain keep USB diagnostics out of the timing path.
 class DiagnosticConsole : public Print {
@@ -22,6 +22,7 @@ public:
       if (inputLength == 0) command = ConsoleCommand::None;
       else if (strcmp(input, "help") == 0) command = ConsoleCommand::Help;
       else if (strcmp(input, "status") == 0) command = ConsoleCommand::Status;
+      else if (strcmp(input, "calibration") == 0) command = ConsoleCommand::Calibration;
       else if (strcmp(input, "raw") == 0) command = ConsoleCommand::Raw;
       else if (strcmp(input, "stream on") == 0) command = ConsoleCommand::StreamOn;
       else if (strcmp(input, "stream off") == 0) command = ConsoleCommand::StreamOff;

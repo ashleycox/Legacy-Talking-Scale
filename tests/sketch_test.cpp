@@ -15,6 +15,7 @@ uint8_t configuredButtonPin = 255;
 uint8_t configuredButtonMode = 255;
 TestSerial Serial;
 TestEEPROM EEPROM;
+bool serialTxBlocked = false;
 
 unsigned long millis() { return testMillis; }
 void pinMode(uint8_t pin, uint8_t mode) {
@@ -30,7 +31,7 @@ int digitalRead(uint8_t pin) {
 #include "../Talking_Scale/Talking_Scale.ino"
 
 bool testVocabularyWord(const uint8_t *word) {
-  const uint8_t *const vocabulary[] = {spPOINT, spSTART, spREADY, spERROR, spMINUS, spPUT, spCALIBRATE, spWEIGHT, spSET, spZERO, spONE, spTWO, spTHREE, spFOUR, spFIVE, spSIX, spSEVEN, spEIGHT, spNINE, spTEN, spELEVEN, spTWELVE, spTHIR_, spFIF_, sp_TEEN, spTWENTY, spT, spHUNDRED, spTHOUSAND, spAND, spCONTROL, spREPEAT, spCHANGE, spMANUAL};
+  const uint8_t *const vocabulary[] = {spPOINT, spSTART, spREADY, spERROR, spMINUS, spPUT, spCALIBRATE, spWEIGHT, spSET, spZERO, spONE, spTWO, spTHREE, spFOUR, spFIVE, spSIX, spSEVEN, spEIGHT, spNINE, spTEN, spELEVEN, spTWELVE, spTHIR_, spFIF_, sp_TEEN, spTWENTY, spT, spHUNDRED, spTHOUSAND, spAND, spCONTROL, spREPEAT, spCHANGE, spMANUAL, spFAIL};
   for (const uint8_t *known : vocabulary) if (word == known) return true;
   return false;
 }
@@ -38,7 +39,7 @@ bool testVocabularyWord(const uint8_t *word) {
 void advance(unsigned long duration) {
   for (unsigned long i = 0; i < duration; ++i) {
     ++testMillis;
-    Serial.advance();
+    if (!serialTxBlocked) Serial.advance();
     loop();
   }
 }
@@ -269,6 +270,55 @@ void testStartupTimeout() {
   assert(EEPROM.putCalls == 0);
 }
 
+void testNoisyStartup() {
+  EEPROM.seed(2000.0f);
+  setup();
+  const auto storedBytes = EEPROM.bytes;
+  for (unsigned int i = 0; operation == STARTUP_ZERO && i < 60; ++i) {
+    scale.raw = 1000 + ((i % 2) ? 20 : -20);
+    advance(100);
+  }
+  // Forty counts of ADC noise exceed the former 0.01 g peak-range gate.
+  // The short averaged blocks repeat reliably and permit the empty-platform tare.
+  assert(operation == WEIGHING && !sensorFault && !zeroTimeoutReported);
+  assert(readingFilter.spread() == 40);
+  assert(readingFilter.meanSpread() <= 20);
+  assert(scale.get_offset() == 1000 && scale.get_scale() == 2000.0f);
+  assert(EEPROM.putCalls == 0 && EEPROM.bytes == storedBytes);
+}
+
+void testStandaloneOperation() {
+  // Even a permanently full UART transmit buffer must not hold up the scale.
+  serialTxBlocked = true;
+  Serial.space = 0;
+  Serial.send("status\n");
+  boot();
+  announcements.setMode(AnnouncementMode::Manual);
+  assert(console.pending() && Serial.output.empty() && Serial.space == 0);
+
+  beginCalibration();
+  waitForPlacement();
+  assert(console.pending() && Serial.output.empty() && Serial.space == 0);
+  scale.raw = 11500;
+  until([] { return operation == WEIGHING; });
+  assert(calibrationStatus == CalibrationStatus::Saved && !menu);
+  assert(scale.get_offset() == 1500 && scale.get_scale() == 2000.0f);
+  float stored;
+  assert(calibrationStore.load(stored) && stored == 2000.0f);
+
+  until([] { return speechIdle() && readingAvailable; });
+  assert(latestReading == 5.0f);
+  const size_t wordCount = voice.words.size();
+  click();
+  until([=] { return voice.words.size() == wordCount + 4 && speechIdle(); });
+  assert(voice.words[wordCount].data == spFIVE);
+  assert(voice.words[wordCount + 1].data == spPOINT);
+  assert(voice.words[wordCount + 2].data == spZERO);
+  assert(voice.words[wordCount + 3].data == spZERO);
+  assert(console.pending() && Serial.output.empty() && Serial.space == 0);
+  assert(!sensorFault && operation == WEIGHING && testInterruptsEnabled);
+}
+
 void testSensorRecovery() {
   boot();
   scale.raw = 2000;
@@ -282,9 +332,9 @@ void testSensorRecovery() {
   scale.connected = true;
   const unsigned int readCount = scale.readCount;
   const float beforeRecovery = latestReading;
-  until([=] { return scale.readCount == readCount + READING_SAMPLES + 5; });
+  until([=] { return scale.readCount == readCount + ScaleFilter::WINDOW_SAMPLES + 5; });
   assert(!sensorFault && latestReading == beforeRecovery);
-  until([=] { return scale.readCount == readCount + READING_SAMPLES + 6; });
+  until([=] { return scale.readCount == readCount + ScaleFilter::WINDOW_SAMPLES + 6; });
   assert(latestReading == 2.0f); // No stale samples from before disconnection.
 }
 
@@ -385,7 +435,7 @@ void testLateCalibrationCancel() {
   beginCalibration();
   waitForPlacement();
   scale.raw = 11500;
-  until([] { return operation == CALIBRATION_READ && sampleCount >= 18; });
+  until([] { return operation == CALIBRATION_READ && calibrationSampler.windowCount() >= 1 && sampleCount >= 18; });
   testButtonLevel = LOW;
   advance(1050);
   assert(operation == WEIGHING && !menu);
@@ -525,6 +575,71 @@ void testRepeatGap(bool requestDuringGap) {
   assert(testInterruptsEnabled);
 }
 
+void testNoisyCalibration() {
+  boot(10000.0f); // The previous calibration must not constrain a new one.
+  beginCalibration();
+  for (unsigned int i = 0; operation == CALIBRATION_ZERO && i < 150; ++i) {
+    scale.raw = 1500 + ((i % 2) ? 20 : -20);
+    advance(100);
+  }
+  assert(operation == CALIBRATION_PROMPT);
+  assert(calibrationBaseline.spread == 40);
+  waitForPlacement();
+  advance(WEIGHT_PLACEMENT_MS);
+  for (unsigned int i = 0; operation == CALIBRATION_READ && i < 150; ++i) {
+    scale.raw = 11500 + ((i % 2) ? 20 : -20);
+    advance(100);
+  }
+  until([] { return operation == WEIGHING; });
+  assert(calibrationStatus == CalibrationStatus::Saved && !menu);
+  assert(fabsf(scale.get_scale() - 2000.0f) <= 1.0f);
+  assert(!calibrationTimedOut);
+  float stored;
+  assert(calibrationStore.load(stored));
+  assert(stored == scale.get_scale());
+}
+
+void testCalibrationFailureDetails() {
+  boot();
+  beginCalibration();
+  waitForPlacement();
+  until([] { return operation == WEIGHING; }); // No reference weight placed.
+  assert(calibrationStatus == CalibrationStatus::NoSignal && calibrationTimedOut);
+  assert(menu && menuOption == CALIBRATE);
+  until([] { return speechIdle(); });
+  assert(voice.words.size() >= 2);
+  assert(voice.words[voice.words.size() - 2].data == spCALIBRATE);
+  assert(voice.words.back().data == spFAIL);
+  Serial.output.clear();
+  Serial.send("calibration\n");
+  advance(500);
+  assert(Serial.output.find("cal=no-signal") != std::string::npos);
+  assert(Serial.output.find("timedout=1") != std::string::npos);
+  assertOldCalibration();
+}
+
+void testCalibrationFaultSpeech() {
+  boot();
+  beginCalibration();
+  waitForPlacement();
+  advance(WEIGHT_PLACEMENT_MS);
+  voice.wordDurationMs = 1200;
+  scale.connected = false;
+  until([] { return sensorFault; });
+  assert(calibrationStatus == CalibrationStatus::SensorFailed && menu);
+  scale.raw = 8388607;
+  scale.connected = true;
+  advance(350); // A changed fault cause must not replace the pending failure cue.
+  assert(sensorFault && sensorHealth.clipped());
+  scale.raw = 1000;
+  until([] { return !sensorFault; });
+  until([] { return speechIdle(); });
+  assert(voice.words.size() >= 2);
+  assert(voice.words[voice.words.size() - 2].data == spCALIBRATE);
+  assert(voice.words.back().data == spFAIL);
+  assertOldCalibration();
+}
+
 int main(int argc, char **argv) {
   assert(argc == 2);
   const char *scenario = argv[1];
@@ -536,6 +651,8 @@ int main(int argc, char **argv) {
   else if (std::strcmp(scenario, "calibration-failure") == 0) testCalibrationFailure(false);
   else if (std::strcmp(scenario, "calibration-timeout") == 0) testCalibrationFailure(true);
   else if (std::strcmp(scenario, "startup-timeout") == 0) testStartupTimeout();
+  else if (std::strcmp(scenario, "startup-jitter") == 0) testNoisyStartup();
+  else if (std::strcmp(scenario, "standalone") == 0) testStandaloneOperation();
   else if (std::strcmp(scenario, "sensor-recovery") == 0) testSensorRecovery();
   else if (std::strcmp(scenario, "fault-menu-exit") == 0) testFaultedMenuExit();
   else if (std::strcmp(scenario, "interrupt") == 0) testSpeechInterruption();
@@ -549,6 +666,9 @@ int main(int argc, char **argv) {
   else if (std::strcmp(scenario, "clip-request") == 0) testRequestSurvivesClip();
   else if (std::strcmp(scenario, "repeat-gap") == 0) testRepeatGap(false);
   else if (std::strcmp(scenario, "gap-button") == 0) testRepeatGap(true);
+  else if (std::strcmp(scenario, "calibration-jitter") == 0) testNoisyCalibration();
+  else if (std::strcmp(scenario, "calibration-details") == 0) testCalibrationFailureDetails();
+  else if (std::strcmp(scenario, "calibration-fault-speech") == 0) testCalibrationFaultSpeech();
   else if (std::strcmp(scenario, "phrase-bound") == 0) testPhraseBound();
   else testInvalidEEPROM(scenario);
   std::printf("Sketch test passed: %s\n", scenario);
