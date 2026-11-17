@@ -1,25 +1,61 @@
 /**
   Arduino Talking Scale
-  A talkingscale using the HX711, a 328-based arduino and the Talkie text to speech library.
-    Concept and code by Ashley Cox, with libraries the property of their respective owners and distributed in accordance with their respective licenses
-  Permission is granted for the code within to be used for non commercial purposes. Please contact for commercial usage rights.
-  More details on this project at https://ashleycox.co.uk
+  Concept and code by Ashley Cox, with libraries the property of their respective owners
+  and distributed in accordance with their respective licenses.
+  Permission is granted for the code within to be used for non commercial purposes.
+  Please contact for commercial usage rights. More details at https://ashleycox.co.uk
 **/
 
-#include <EEPROMex.h> //Library to handle eePROM
-#include <EEPROMVar.h>
-#include <talkie.h> //The Talkie TTS library
-#include <HX711.h> //The HX711 library
-#include <OneButton.h> //Handles the button
+#include <Arduino.h>
+#include <EEPROM.h>
+#include <Talkie.h>
+#include <HX711.h>
+#include <OneButton.h>
+#include "ScaleReading.h"
 
-//Globalvariables
-OneButton button(2, true); // instantiation of a OneButton object
-const int LOADCELL_DOUT_PIN = 4, LOADCELL_SCK_PIN = 5; //HX711 pins
-int r1, r2, r3; //For splitting the number
-int menuOption; //Used to navigate the menu
-int tare_weight = 5; //Determins calibration status and the calibration weight
-float cal_factor, reading, prevReading = 0; //Scale calibration factor and readings
-bool speak = true, menu = false; //Booleans stop the same reading being continually announced and handle the menu
+#if !defined(__AVR_ATmega328P__) || F_CPU != 16000000UL
+#error This sketch requires a 16 MHz ATmega328P Nano or Uno with speech on D3.
+#endif
+
+const uint8_t BUTTON_PIN = 2;
+const uint8_t LOADCELL_DOUT_PIN = 4;
+const uint8_t LOADCELL_SCK_PIN = 5;
+const uint8_t READING_SAMPLES = 20;
+const uint8_t ZERO_SAMPLES = 10;
+const float CALIBRATION_WEIGHT_GRAMS = 5.0f;
+const unsigned long WEIGHT_PLACEMENT_MS = 2000;
+const unsigned long SENSOR_TIMEOUT_MS = 3000;
+const int CALIBRATION_ADDRESS = 0; // Retains the legacy EEPROM float layout.
+
+// Talkie owns timers 1 and 2. At 16 MHz timer 0 still supplies millis() to OneButton.
+// Disable Talkie's default inverted D11 output: the existing speaker uses D3/GND.
+Talkie voice(true, false);
+OneButton button;
+HX711 scale;
+
+// One phrase fits here, including readings up to 999999 grams and two decimals.
+const uint8_t MAX_PHRASE_WORDS = 32;
+const uint8_t *speechWords[MAX_PHRASE_WORDS];
+uint8_t speechLength = 0;
+uint8_t nextSpeechWord = 0;
+
+enum Operation {
+  STARTUP_ZERO, WEIGHING, USER_ZERO, CALIBRATION_ZERO,
+  CALIBRATION_PROMPT, CALIBRATION_WAIT, CALIBRATION_READ
+};
+enum MenuOption { NO_SELECTION, ZERO_WEIGHT, CALIBRATE };
+Operation operation = STARTUP_ZERO;
+MenuOption menuOption = NO_SELECTION;
+bool menu = false;
+bool calibrated = false;
+bool sensorFault = false;
+bool readingAvailable = false;
+float latestReading = 0.0f;
+long sampleSum = 0;
+uint8_t sampleCount = 0;
+long calibrationZero = 0;
+unsigned long placementStartedAt = 0;
+unsigned long lastSampleAt = 0;
 
 //Speech variables
 const uint8_t spPOINT[] PROGMEM = {0x0A, 0xC8, 0x2E, 0x8C, 0x01, 0xD1, 0x85, 0x95, 0x34, 0x8B, 0xAA, 0x74, 0x56, 0xBD, 0xCA, 0xE8, 0xA6, 0xCA, 0x29, 0xCB, 0x2A, 0x92, 0xEE, 0xCA, 0xA4, 0x36, 0x2B, 0x2F, 0xAA, 0x3C, 0x43, 0x9A, 0xAC, 0xBC, 0x78, 0xF3, 0xD0, 0x68, 0xD4, 0xB2, 0x6A, 0x45, 0x4A, 0x2A, 0xA6, 0xC9, 0x93, 0xC4, 0x29, 0x09, 0xC7, 0x24, 0x8D, 0xB1, 0xD3, 0xCD, 0x08, 0x21, 0x70, 0x8A, 0x52, 0x15, 0xAA, 0x01, 0xE0, 0x80, 0x63, 0xC2, 0x14, 0x70, 0x94, 0x19, 0x01, 0xA6, 0x32, 0xFB, 0x7F};
@@ -55,212 +91,320 @@ const uint8_t spHUNDRED[]  PROGMEM = {0x04, 0xC8, 0x7E, 0x5C, 0x02, 0x0A, 0xA8, 
 const uint8_t spTHOUSAND[] PROGMEM = {0x0C, 0xE8, 0x2E, 0xD4, 0x02, 0x06, 0x98, 0xD2, 0x55, 0x03, 0x16, 0x68, 0x7D, 0x17, 0xE9, 0x6E, 0xBC, 0x65, 0x8C, 0x45, 0x6D, 0xA6, 0xE9, 0x96, 0xDD, 0xDE, 0xF6, 0xB6, 0xB7, 0x5E, 0x75, 0xD4, 0x93, 0xA5, 0x9C, 0x7B, 0x57, 0xB3, 0x6E, 0x7D, 0x12, 0x19, 0xAD, 0xDC, 0x29, 0x8D, 0x4F, 0x93, 0xB4, 0x87, 0xD2, 0xB6, 0xFC, 0xDD, 0xAC, 0x22, 0x56, 0x02, 0x70, 0x18, 0xCA, 0x18, 0x26, 0xB5, 0x90, 0xD4, 0xDE, 0x6B, 0x29, 0xDA, 0x2D, 0x25, 0x17, 0x8D, 0x79, 0x88, 0xD4, 0x48, 0x79, 0x5D, 0xF7, 0x74, 0x75, 0xA1, 0x94, 0xA9, 0xD1, 0xF2, 0xED, 0x9E, 0xAA, 0x51, 0xA6, 0xD4, 0x9E, 0x7F, 0xED, 0x6F, 0xFE, 0x2B, 0xD1, 0xC7, 0x3D, 0x89, 0xFA, 0xB7, 0x0D, 0x57, 0xD3, 0xB4, 0xF5, 0x37, 0x55, 0x37, 0x2E, 0xE6, 0xB2, 0xD7, 0x57, 0xFF, 0x0F};
 const uint8_t spAND[]      PROGMEM = {0xA9, 0x6B, 0x21, 0xB9, 0x22, 0x66, 0x9F, 0xAE, 0xC7, 0xE1, 0x70, 0x7B, 0x72, 0xBB, 0x5B, 0xDF, 0xEA, 0x56, 0xBB, 0x5C, 0x65, 0xCB, 0x66, 0xC5, 0x3D, 0x67, 0xD7, 0xAB, 0x6D, 0x2E, 0x64, 0x30, 0x93, 0xEE, 0xB1, 0xCD, 0x3D, 0x92, 0xB9, 0x9A, 0xDA, 0xB2, 0x8E, 0x40, 0x12, 0x9A, 0x6A, 0xEB, 0x96, 0x8F, 0x78, 0x98, 0xB3, 0x2A, 0xB4, 0xD3, 0x48, 0xAA, 0x2F, 0x7D, 0xA7, 0x7B, 0xFB, 0x0C, 0x73, 0x71, 0x5C, 0xCE, 0x6E, 0x5C, 0x52, 0x6C, 0x73, 0x79, 0x9A, 0x13, 0x4B, 0x89, 0x45, 0xE9, 0x6E, 0x49, 0x42, 0xA9, 0x57, 0xFF, 0x3F};
 
-//Initialise libraries
-Talkie voice;
-HX711 scale;
-
-void setup() {
-  Serial.begin(9400);
-  //initialise the HX711
-  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
-  //check if we have a calibration factor stored in our EEPROM
-  if (EEPROM.readFloat(0)) {
-    //if we do, we want to use it
-    cal_factor = EEPROM.readFloat(0);
-    scale.set_scale(cal_factor);
-  } else {
-    //we'll need to calibrate, so use zero for now
-    scale.set_scale(0);
-  }
-  delay(100);
-  //Serial.print("Calibration Factor Is: ");
-  //Serial.println(cal_factor);
-  //Serial.print("Reading Before Tare Is: ");
-  //Serial.println(scale.get_units(20));
-  scale.tare(10);
-  delay(100);
-  button.attachClick(buttonClick); //toggles between menu items
-  button.attachDoubleClick(buttonDoubleClick); //changes a menu item
-  button.attachLongPressStart(buttonPress); //enters and exits the menu
-  button.setClickTicks(600); //the minimum delay to count a click
-  button.setPressTicks(1000); //the minimum duration of a long press
-  voice.say(spREADY);
+// Replacing a phrase drops its unspoken suffix and lets the current word finish.
+void startPhrase() {
+  voice.stop();
+  speechLength = 0;
+  nextSpeechWord = 0;
 }
 
-void loop() {
-  //we monitor the button on each loop
-  button.tick();
-  if (!menu) {
-    //Take an average of 20 readings from the HX711 for better accuracy
-    reading = scale.get_units(20), tare_weight;
-    //Serial.println("Current Weight: ");
-    //Serial.println(reading);
-    //We break the reading up to speak it properly
-    //R1 is an integer, therefore we lose the decimal
-    r1 = reading;
-    //Work out the decimal
-    r2 = reading * 10 - r1 * 10;
-    //A second decimal
-    r3 = reading * 100 - r1 * 100;
-    //Print individual numbers and Speak the reading
-    //Serial.println("Individual Numeric Values are: ");
-    //Serial.println(r1);
-    //Serial.println(r2);
-    //Serial.println(r3 / 100);
-    speakNum(r1);
-    voice.say(spPOINT);
-    speakNum(r2);
-    speakNum(r3 / 10);
+void queueWord(const uint8_t *word) {
+  if (speechLength < MAX_PHRASE_WORDS) {
+    speechWords[speechLength++] = word;
   }
 }
 
-void calibrate () {
-  //Zero the scale
-  scale.set_scale();
-  scale.tare();
-  voice.say(spPUT);
-  speakNum(tare_weight);
-
-  //Serial.println("Place Weight");
-  //gives us time to place the weight
-  delay (2000);
-  //Populate our calibration factor variable
-  //using a 5 gram known weight
-  //  Serial.println("Calibration Factor Is: ");
-  //  Serial.print(scale.get_units(20) / 5.00);
-  cal_factor = scale.get_units(20) / 5.00;
-  scale.set_scale(cal_factor);
-  //store the calibration factor in EEPROM
-  if (EEPROM.readFloat(0)) {
-    EEPROM.updateFloat(0, cal_factor);
-    //Serial.println("Updated EEPROM");
-  } else {
-    EEPROM.writeFloat(0, cal_factor);
-    //Serial.println("Written EEPROM Calibration Value");
-  }
-  delay(100);
-  voice.say(spWEIGHT);
-  voice.say(spFIVE);
-  menu = false;
+bool speechIdle() {
+  return nextSpeechWord == speechLength && !voice.isTalking();
 }
 
-// function to translate any number between - 999999 and + 999999 into spoken values
-void speakNum(int n) {
-  if (n < 0) {
-    voice.say(spMINUS);
-    speakNum(-n);
-  } else if (n == 0) {
-    voice.say(spZERO);
+void serviceSpeech() {
+  // sayQ also blocks if its internal FIFO fills. Feed only one idle word at a time.
+  if (nextSpeechWord < speechLength && !voice.isTalking()) {
+    voice.sayQ(speechWords[nextSpeechWord++]);
+  }
+}
+
+void queueNumber(uint32_t n) {
+  if (n == 0) {
+    queueWord(spZERO);
   } else {
     if (n >= 1000) {
-      int thousands = n / 1000;
-      speakNum(thousands);
-      voice.say(spTHOUSAND);
+      uint32_t thousands = n / 1000;
+      queueNumber(thousands);
+      queueWord(spTHOUSAND);
       n %= 1000;
-      if ((n > 0) && (n < 100)) voice.say(spAND);
+      if ((n > 0) && (n < 100)) queueWord(spAND);
     }
     if (n >= 100) {
-      int hundreds = n / 100;
-      speakNum(hundreds);
-      voice.say(spHUNDRED);
+      uint8_t hundreds = n / 100;
+      queueNumber(hundreds);
+      queueWord(spHUNDRED);
       n %= 100;
-      if (n > 0) voice.say(spAND);
+      if (n > 0) queueWord(spAND);
     }
     if (n > 19) {
-      int tens = n / 10;
+      uint8_t tens = n / 10;
       switch (tens) {
-        case 2: voice.say(spTWENTY); break;
-        case 3: voice.say(spTHIR_); voice.say(spT); break;
-        case 4: voice.say(spFOUR); voice.say(spT);  break;
-        case 5: voice.say(spFIF_);  voice.say(spT); break;
-        case 6: voice.say(spSIX);  voice.say(spT); break;
-        case 7: voice.say(spSEVEN);  voice.say(spT); break;
-        case 8: voice.say(spEIGHT);  voice.say(spT); break;
-        case 9: voice.say(spNINE);  voice.say(spT); break;
+        case 2: queueWord(spTWENTY); break;
+        case 3: queueWord(spTHIR_); queueWord(spT); break;
+        case 4: queueWord(spFOUR); queueWord(spT);  break;
+        case 5: queueWord(spFIF_);  queueWord(spT); break;
+        case 6: queueWord(spSIX);  queueWord(spT); break;
+        case 7: queueWord(spSEVEN);  queueWord(spT); break;
+        case 8: queueWord(spEIGHT);  queueWord(spT); break;
+        case 9: queueWord(spNINE);  queueWord(spT); break;
       }
       n %= 10;
     }
     switch (n) {
-      case 1: voice.say(spONE); break;
-      case 2: voice.say(spTWO); break;
-      case 3: voice.say(spTHREE); break;
-      case 4: voice.say(spFOUR); break;
-      case 5: voice.say(spFIVE); break;
-      case 6: voice.say(spSIX); break;
-      case 7: voice.say(spSEVEN); break;
-      case 8: voice.say(spEIGHT); break;
-      case 9: voice.say(spNINE); break;
-      case 10: voice.say(spTEN); break;
-      case 11: voice.say(spELEVEN); break;
-      case 12: voice.say(spTWELVE); break;
-      case 13: voice.say(spTHIR_); voice.say(sp_TEEN); break;
-      case 14: voice.say(spFOUR); voice.say(sp_TEEN); break;
-      case 15: voice.say(spFIF_); voice.say(sp_TEEN); break;
-      case 16: voice.say(spSIX); voice.say(sp_TEEN); break;
-      case 17: voice.say(spSEVEN); voice.say(sp_TEEN); break;
-      case 18: voice.say(spEIGHT); voice.say(sp_TEEN); break;
-      case 19: voice.say(spNINE); voice.say(sp_TEEN); break;
+      case 1: queueWord(spONE); break;
+      case 2: queueWord(spTWO); break;
+      case 3: queueWord(spTHREE); break;
+      case 4: queueWord(spFOUR); break;
+      case 5: queueWord(spFIVE); break;
+      case 6: queueWord(spSIX); break;
+      case 7: queueWord(spSEVEN); break;
+      case 8: queueWord(spEIGHT); break;
+      case 9: queueWord(spNINE); break;
+      case 10: queueWord(spTEN); break;
+      case 11: queueWord(spELEVEN); break;
+      case 12: queueWord(spTWELVE); break;
+      case 13: queueWord(spTHIR_); queueWord(sp_TEEN); break;
+      case 14: queueWord(spFOUR); queueWord(sp_TEEN); break;
+      case 15: queueWord(spFIF_); queueWord(sp_TEEN); break;
+      case 16: queueWord(spSIX); queueWord(sp_TEEN); break;
+      case 17: queueWord(spSEVEN); queueWord(sp_TEEN); break;
+      case 18: queueWord(spEIGHT); queueWord(sp_TEEN); break;
+      case 19: queueWord(spNINE); queueWord(sp_TEEN); break;
     }
   }
 }
 
-void tare() {
-  scale.tare(tare_weight);
-  voice.say(spZERO);
+void queueReading(float grams) {
+  SpokenReading reading;
+  startPhrase();
+  if (!splitReading(grams, reading)) {
+    queueWord(spERROR);
+    return;
+  }
+  if (reading.negative) queueWord(spMINUS);
+  queueNumber(reading.whole);
+  queueWord(spPOINT);
+  queueNumber(reading.tenths);
+  queueNumber(reading.hundredths);
 }
 
+bool validCalibration(float factor) {
+  return isfinite(factor) && factor != 0.0f;
+}
 
-//Handles toggling of menu items
+void resetSamples() {
+  sampleSum = 0;
+  sampleCount = 0;
+  readingAvailable = false;
+}
+
+void announceReady() {
+  startPhrase();
+  if (sensorFault) {
+    queueWord(spERROR);
+  } else if (calibrated) {
+    queueWord(spREADY);
+  } else {
+    queueWord(spERROR);
+    queueWord(spCALIBRATE);
+  }
+}
+
+void beginOperation(Operation next) {
+  startPhrase();
+  resetSamples();
+  operation = next;
+}
+
+void calibrationFailed() {
+  // The old offset and factor are untouched until a calibration succeeds.
+  operation = WEIGHING;
+  resetSamples();
+  menu = true;
+  menuOption = CALIBRATE;
+  startPhrase();
+  queueWord(spERROR);
+  queueWord(spCALIBRATE);
+}
+
+void finishAverage(long average) {
+  switch (operation) {
+    case STARTUP_ZERO:
+      scale.set_offset(average);
+      operation = WEIGHING;
+      if (!calibrated) {
+        menu = true;
+        menuOption = CALIBRATE;
+      }
+      announceReady();
+      break;
+    case USER_ZERO:
+      scale.set_offset(average);
+      operation = WEIGHING;
+      startPhrase();
+      queueWord(spZERO);
+      break;
+    case CALIBRATION_ZERO:
+      calibrationZero = average;
+      operation = CALIBRATION_PROMPT;
+      startPhrase();
+      queueWord(spPUT);
+      queueNumber(static_cast<uint32_t>(CALIBRATION_WEIGHT_GRAMS));
+      break;
+    case CALIBRATION_READ: {
+      const float factor = (average - calibrationZero) / CALIBRATION_WEIGHT_GRAMS;
+      if (!validCalibration(factor)) {
+        calibrationFailed();
+        break;
+      }
+      scale.set_offset(calibrationZero);
+      scale.set_scale(factor);
+      EEPROM.put(CALIBRATION_ADDRESS, factor); // Updates changed bytes only.
+      calibrated = true;
+      menu = false;
+      operation = WEIGHING;
+      startPhrase();
+      queueWord(spWEIGHT);
+      queueNumber(static_cast<uint32_t>(CALIBRATION_WEIGHT_GRAMS));
+      Serial.print(F("Calibration factor: "));
+      Serial.println(factor, 6);
+      break;
+    }
+    case WEIGHING:
+      latestReading = (average - scale.get_offset()) / scale.get_scale();
+      readingAvailable = true;
+      Serial.println(latestReading, 2);
+      break;
+    default:
+      break;
+  }
+}
+
+void serviceOperation(unsigned long now) {
+  if (operation == CALIBRATION_PROMPT && speechIdle()) {
+    // Give the full placement interval after "put five" has finished speaking.
+    placementStartedAt = now;
+    operation = CALIBRATION_WAIT;
+  } else if (operation == CALIBRATION_WAIT &&
+             now - placementStartedAt >= WEIGHT_PLACEMENT_MS) {
+    resetSamples();
+    operation = CALIBRATION_READ;
+  }
+}
+
+void serviceScale(unsigned long now) {
+  if (!scale.is_ready()) {
+    if (!sensorFault && now - lastSampleAt >= SENSOR_TIMEOUT_MS) {
+      sensorFault = true;
+      resetSamples();
+      // Startup retries automatically. Cancel other operations without saving them.
+      if (operation != STARTUP_ZERO) operation = WEIGHING;
+      startPhrase();
+      queueWord(spERROR);
+      Serial.println(F("HX711 not ready; check the sensor."));
+    }
+    return;
+  }
+
+  // bogde HX711 protects the clock pulses from Talkie's ISR on AVR.
+  // Read just one ready conversion; never wait for a 20-conversion batch.
+  const long raw = scale.read();
+  lastSampleAt = now;
+  if (sensorFault) {
+    sensorFault = false;
+    resetSamples();
+    if (operation == WEIGHING) announceReady();
+  }
+
+  // Drain conversions during prompts/placement so calibration starts with fresh data.
+  if (operation == CALIBRATION_PROMPT || operation == CALIBRATION_WAIT ||
+      (operation == WEIGHING && (menu || !calibrated))) return;
+
+  sampleSum += raw; // 20 signed 24-bit conversions fit in a signed 32-bit long.
+  ++sampleCount;
+  const uint8_t target = (operation == STARTUP_ZERO || operation == USER_ZERO ||
+                          operation == CALIBRATION_ZERO) ? ZERO_SAMPLES : READING_SAMPLES;
+  if (sampleCount == target) {
+    const long average = sampleSum / sampleCount;
+    sampleSum = 0;
+    sampleCount = 0;
+    finishAverage(average);
+  }
+}
+
 void buttonClick() {
-  if (menu) {
-    menuOption = menuOption + 1;
-    speak = true;
-    switch (menuOption) {
-      case 1:
-        if (speak) {
-          voice.say(spZERO);
-          voice.say(spWEIGHT);
-          speak = false;
-        }
-        break;
-      case 2:
-        if (speak) {
-          voice.say(spCALIBRATE);
-          speak = false;
-        }
-        break;
-      case 3:
-        speak = true;
-        menuOption = 1;
-        buttonClick();
-        break;
-    }
+  if (!menu || operation != WEIGHING) return;
+  menuOption = menuOption == ZERO_WEIGHT ? CALIBRATE : ZERO_WEIGHT;
+  startPhrase();
+  if (menuOption == ZERO_WEIGHT) {
+    queueWord(spZERO);
+    queueWord(spWEIGHT);
+  } else {
+    queueWord(spCALIBRATE);
   }
 }
 
-//Handles changing menu values
 void buttonDoubleClick() {
-  if (menu) {
-    switch (menuOption) {
-      case 1:
-        tare();
-        speak = true;
-        break;
-      case 2:
-        calibrate();
-        speak = true;
-        break;
-    }
+  if (!menu || operation != WEIGHING) return;
+  if (sensorFault) {
+    startPhrase();
+    queueWord(spERROR);
+    return;
+  }
+  if (menuOption == ZERO_WEIGHT) {
+    beginOperation(USER_ZERO);
+  } else if (menuOption == CALIBRATE) {
+    // The platform must be empty when this is selected.
+    beginOperation(CALIBRATION_ZERO);
   }
 }
 
-//Handles entering and exiting the menu
 void buttonPress() {
-  // buttonPress enters or exitsmenu, hence the boolean inMenu value changes
+  if (operation == STARTUP_ZERO) return;
+  if (operation != WEIGHING) {
+    // Long press cancels a pending tare/calibration and preserves the saved factor.
+    operation = WEIGHING;
+    menu = false;
+    resetSamples();
+    announceReady();
+    return;
+  }
   menu = !menu;
+  resetSamples();
   if (menu) {
-    voice.say(spSET);
-    //allow user to select the first item in the menu
-    menuOption = 0;
+    menuOption = NO_SELECTION;
+    startPhrase();
+    queueWord(spSET);
+  } else {
+    announceReady();
+  }
+}
+
+void setup() {
+  Serial.begin(9600);
+  button.setup(BUTTON_PIN, INPUT_PULLUP, true);
+  button.attachClick(buttonClick);
+  button.attachDoubleClick(buttonDoubleClick);
+  button.attachLongPressStart(buttonPress);
+  button.setDebounceMs(50);
+  button.setClickMs(600);
+  button.setPressMs(1000);
+
+  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+  float factor;
+  EEPROM.get(CALIBRATION_ADDRESS, factor);
+  calibrated = validCalibration(factor);
+  scale.set_scale(calibrated ? factor : 1.0f);
+  lastSampleAt = millis();
+  // Tare the empty platform across loop iterations while still polling the button.
+}
+
+void loop() {
+  button.tick();
+  const unsigned long now = millis();
+  serviceSpeech();
+  serviceOperation(now);
+  serviceScale(now);
+  if (operation == WEIGHING && !menu && calibrated && !sensorFault &&
+      readingAvailable && speechIdle()) {
+    queueReading(latestReading);
+    readingAvailable = false;
   }
 }
