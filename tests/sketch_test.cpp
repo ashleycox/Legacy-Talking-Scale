@@ -272,9 +272,9 @@ void testSensorRecovery() {
   scale.connected = true;
   const unsigned int readCount = scale.readCount;
   const float beforeRecovery = latestReading;
-  until([=] { return scale.readCount == readCount + READING_SAMPLES + 1; });
+  until([=] { return scale.readCount == readCount + READING_SAMPLES + 5; });
   assert(!sensorFault && latestReading == beforeRecovery);
-  until([=] { return scale.readCount == readCount + READING_SAMPLES + 2; });
+  until([=] { return scale.readCount == readCount + READING_SAMPLES + 6; });
   assert(latestReading == 2.0f); // No stale samples from before disconnection.
 }
 
@@ -420,6 +420,35 @@ void testAnnouncementModes() {
   assert(announcements.mode() == AnnouncementMode::Manual);
 }
 
+void testClippedSensor() {
+  boot();
+  announcements.setMode(AnnouncementMode::Manual);
+  scale.raw = 8388607;
+  advance(350);
+  assert(sensorFault && sensorHealth.clipped());
+  assert(!readingAvailable && readingFilter.count() == 0);
+  assert(speechLength == 1 && speechWords[0] == spERROR);
+  assertOldCalibration();
+  scale.raw = 1000;
+  advance(300);
+  assert(sensorFault);
+  advance(300);
+  assert(!sensorFault);
+  until([] { return readingFilter.ready(); });
+  assert(latestReading == 0.0f);
+}
+
+void testRequestSurvivesClip() {
+  boot();
+  announcements.setMode(AnnouncementMode::Manual);
+  announcements.request();
+  scale.raw = 8388607;
+  advance(100);
+  assert(!sensorFault && !readingAvailable);
+  scale.raw = 1000;
+  until([] { return speakingMeasurement; });
+}
+
 int main(int argc, char **argv) {
   assert(argc == 2);
   const char *scenario = argv[1];
@@ -439,6 +468,8 @@ int main(int argc, char **argv) {
   else if (std::strcmp(scenario, "late-cancel") == 0) testLateCalibrationCancel();
   else if (std::strcmp(scenario, "unstable-tare") == 0) testUnstableTare();
   else if (std::strcmp(scenario, "modes") == 0) testAnnouncementModes();
+  else if (std::strcmp(scenario, "clipping") == 0) testClippedSensor();
+  else if (std::strcmp(scenario, "clip-request") == 0) testRequestSurvivesClip();
   else if (std::strcmp(scenario, "phrase-bound") == 0) testPhraseBound();
   else testInvalidEEPROM(scenario);
   std::printf("Sketch test passed: %s\n", scenario);

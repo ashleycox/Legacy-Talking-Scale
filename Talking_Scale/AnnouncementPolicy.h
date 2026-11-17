@@ -18,8 +18,10 @@ public:
     reset();
   }
 
+  void resetHistory() { hasCompleted = false; }
+
   void reset() {
-    hasCompleted = false;
+    resetHistory();
     requested = false;
   }
 

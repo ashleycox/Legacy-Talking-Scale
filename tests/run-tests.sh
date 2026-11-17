@@ -36,11 +36,15 @@ compiler=${CXX:-c++}
   "$test_dir/announcement_test.cpp" -o "$build_dir/announcement-test"
 "$build_dir/announcement-test"
 
+"$compiler" -std=c++11 -Wall -Wextra -Werror -pedantic \
+  "$test_dir/sensor_test.cpp" -o "$build_dir/sensor-test"
+"$build_dir/sensor-test"
+
 # Each invocation starts the actual sketch's globals from a fresh boot.
 for scenario in speech button-menu calibration calibration-negative \
   cancel-zero cancel-prompt cancel-wait cancel-read calibration-failure \
   calibration-timeout erased-eeprom zero-factor nan-factor infinity-factor \
   startup-timeout sensor-recovery fault-menu-exit interrupt interrupt-calibration \
-  phrase-bound calibration-noise late-cancel unstable-tare modes; do
+  phrase-bound calibration-noise late-cancel unstable-tare modes clipping clip-request; do
   "$build_dir/sketch-test" "$scenario"
 done

@@ -18,6 +18,7 @@
 #include "CalibrationStore.h"
 #include "AnnouncementPolicy.h"
 #include "ModeVocabulary.h"
+#include "SensorHealth.h"
 
 #if !defined(__AVR_ATmega328P__) || F_CPU != 16000000UL
 #error This sketch requires a 16 MHz ATmega328P Nano or Uno with speech on D3.
@@ -42,6 +43,7 @@ Talkie voice(true, false);
 ScaleButton button;
 HX711 scale;
 ScaleFilter readingFilter;
+SensorHealth sensorHealth;
 AnnouncementPolicy announcements;
 bool speakingMeasurement = false;
 int32_t spokenValue = 0;
@@ -226,13 +228,17 @@ bool validCalibration(float factor) {
   return validCalibrationFactor(factor);
 }
 
-void resetSamples() {
-  announcements.reset();
+void clearAcquisition() {
   readingFilter.reset();
   readingStable = stableWindow = false;
   sampleSum = 0;
   sampleCount = 0;
   readingAvailable = false;
+}
+
+void resetSamples() {
+  announcements.reset();
+  clearAcquisition();
 }
 
 void announceReady() {
@@ -369,15 +375,19 @@ void serviceOperation(unsigned long now) {
   }
 }
 
+void reportSensorFault() {
+  sensorFault = true;
+  resetSamples();
+  if (operation != STARTUP_ZERO) operation = WEIGHING;
+  startPhrase();
+  queueWord(spERROR);
+}
+
 void serviceScale(unsigned long now) {
   if (!scale.is_ready()) {
     if (!sensorFault && now - lastSampleAt >= SENSOR_TIMEOUT_MS) {
-      sensorFault = true;
-      resetSamples();
-      // Startup retries automatically. Cancel other operations without saving them.
-      if (operation != STARTUP_ZERO) operation = WEIGHING;
-      startPhrase();
-      queueWord(spERROR);
+      sensorHealth.timeout();
+      reportSensorFault();
       Serial.println(F("HX711 not ready; check the sensor."));
     }
     return;
@@ -387,9 +397,22 @@ void serviceScale(unsigned long now) {
   // Read just one ready conversion; never wait for a 20-conversion batch.
   const long raw = scale.read();
   lastSampleAt = now;
-  if (sensorFault) {
+  const SensorSample health = sensorHealth.add(static_cast<int32_t>(raw));
+  if (health == SensorSample::Fault) {
+    reportSensorFault();
+    Serial.println(F("HX711 signal is clipped."));
+    return;
+  }
+  if (health == SensorSample::Reject) {
+    clearAcquisition();
+    announcements.resetHistory();
+    if (speakingMeasurement) startPhrase();
+    return;
+  }
+  if (health == SensorSample::Recovered) {
     sensorFault = false;
-    resetSamples();
+    clearAcquisition();
+    announcements.resetHistory();
     if (operation == WEIGHING) announceReady();
   }
 

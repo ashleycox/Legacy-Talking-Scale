@@ -136,8 +136,12 @@ the routine cannot identify an incorrect reference weight.
 
 If the HX711 stops providing conversions for three seconds, the scale announces
 "error", stops reporting measurements, and keeps polling the button and sensor.
-Startup zeroing resumes when the sensor recovers; interrupted user operations
-must be selected again.
+Clipped conversions at either ADC limit are discarded immediately. Three
+consecutive clipped conversions announce a sensor error in every speech mode.
+Recovery requires five consecutive valid conversions, followed by a fresh
+filtered window. Startup zeroing resumes when the sensor recovers; interrupted
+user operations must be selected again. ADC clipping does not establish the
+load cell's mechanical overload limit.
 
 ## Software changes and verification
 
