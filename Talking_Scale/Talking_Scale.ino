@@ -15,6 +15,7 @@
 #include "ScaleReading.h"
 #include "CalibrationCheck.h"
 #include "ScaleFilter.h"
+#include "CalibrationStore.h"
 
 #if !defined(__AVR_ATmega328P__) || F_CPU != 16000000UL
 #error This sketch requires a 16 MHz ATmega328P Nano or Uno with speech on D3.
@@ -31,7 +32,7 @@ const unsigned long SENSOR_TIMEOUT_MS = 3000;
 const unsigned long CALIBRATION_TIMEOUT_MS = 15000;
 const unsigned long ZERO_TIMEOUT_MS = 15000;
 const unsigned long ZERO_SETTLE_MS = 500;
-const int CALIBRATION_ADDRESS = 0; // Retains the legacy EEPROM float layout.
+CalibrationStore<EEPROMClass> calibrationStore(EEPROM);
 
 // Talkie owns timers 1 and 2. Timer 0 supplies millis() for button timing.
 // Disable Talkie's default inverted D11 output: the existing speaker uses D3/GND.
@@ -317,9 +318,12 @@ void serviceOperation(unsigned long now) {
     return;
   }
   if (operation == CALIBRATION_COMMIT && !button.busy() && !speechPaused) {
+    if (!calibrationStore.save(candidateCalibration)) {
+      calibrationFailed();
+      return;
+    }
     scale.set_offset(calibrationZero);
     scale.set_scale(candidateCalibration);
-    EEPROM.put(CALIBRATION_ADDRESS, candidateCalibration);
     calibrated = true;
     menu = false;
     operation = WEIGHING;
@@ -481,8 +485,7 @@ void setup() {
 
   scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
   float factor;
-  EEPROM.get(CALIBRATION_ADDRESS, factor);
-  calibrated = validCalibration(factor);
+  calibrated = calibrationStore.load(factor);
   scale.set_scale(calibrated ? factor : 1.0f);
   lastSampleAt = millis();
   operationStartedAt = lastSampleAt;

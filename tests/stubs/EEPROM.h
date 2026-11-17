@@ -8,11 +8,20 @@
 
 class TestEEPROM {
 public:
-  std::array<uint8_t, 32> bytes;
+  std::array<uint8_t, 64> bytes;
   unsigned int putCalls = 0;
   unsigned int changedBytes = 0;
 
   TestEEPROM() { bytes.fill(0xff); }
+
+  uint8_t read(int address) {
+    assert(address >= 0 && static_cast<size_t>(address) < bytes.size());
+    return bytes[address];
+  }
+  void update(int address, uint8_t value) {
+    assert(address >= 0 && static_cast<size_t>(address) < bytes.size());
+    if (bytes[address] != value) { bytes[address] = value; ++changedBytes; }
+  }
 
   template <typename T> T &get(int address, T &value) {
     assert(address >= 0 && address + sizeof(T) <= bytes.size());
@@ -37,6 +46,7 @@ public:
   void seed(float factor) { std::memcpy(bytes.data(), &factor, sizeof(factor)); }
 };
 
+using EEPROMClass = TestEEPROM;
 extern TestEEPROM EEPROM;
 
 #endif

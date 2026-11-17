@@ -58,9 +58,12 @@ profile and supply the board's serial port, for example:
 arduino-cli upload --profile nano_old --port /dev/cu.usbserial-XXXX Talking_Scale
 ```
 
-Serial diagnostics use 9600 baud. The calibration factor remains a four-byte
-float at EEPROM address 0, so a valid calibration from the old software survives
-an ordinary sketch upload. Erased EEPROM, zero, NaN, and infinity require
+Serial diagnostics use 9600 baud. An existing four-byte calibration float at EEPROM address 0 is imported once
+into two alternating, versioned records with CRC16 checksums. Each save commits
+the new record last, preserving the previous record if power fails mid-write.
+The old float is retained, but is never used as a fallback after journal
+initialization, so corrupt records cannot silently revive stale calibration.
+User settings use separate bytes. Erased EEPROM, zero, NaN, and infinity require
 calibration; the scale announces "error calibrate" and selects calibration in
 the menu instead of speaking invalid measurements.
 

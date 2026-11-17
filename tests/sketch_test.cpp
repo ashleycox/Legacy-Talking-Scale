@@ -101,7 +101,7 @@ void assertOldCalibration() {
   assert(scale.get_offset() == 1000);
   assert(scale.get_scale() == 1000.0f);
   float stored;
-  EEPROM.get(0, stored);
+  assert(calibrationStore.load(stored));
   assert(stored == 1000.0f);
   assert(EEPROM.putCalls == 0);
 }
@@ -174,12 +174,12 @@ void testCalibration(bool negative) {
   const float expectedFactor = negative ? -2000.0f : 2000.0f;
   assert(scale.get_scale() == expectedFactor);
   float stored;
-  EEPROM.get(0, stored);
+  assert(calibrationStore.load(stored));
   assert(stored == expectedFactor);
-  assert(EEPROM.putCalls == 1);
+  assert(EEPROM.putCalls == 0);
   assert(EEPROM.changedBytes > 0);
-  // Saving calibration uses precisely the original four-byte EEPROM location.
-  for (size_t i = sizeof(float); i < EEPROM.bytes.size(); ++i) {
+  // The journal preserves the legacy factor and reserved user-settings bytes.
+  for (size_t i = sizeof(float); i < 8; ++i) {
     assert(EEPROM.bytes[i] == 0xff);
   }
 }

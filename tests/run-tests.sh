@@ -28,6 +28,10 @@ compiler=${CXX:-c++}
   "$test_dir/filter_test.cpp" -o "$build_dir/filter-test"
 "$build_dir/filter-test"
 
+"$compiler" -std=c++11 -Wall -Wextra -Werror -pedantic \
+  "$test_dir/storage_test.cpp" -o "$build_dir/storage-test"
+"$build_dir/storage-test"
+
 # Each invocation starts the actual sketch's globals from a fresh boot.
 for scenario in speech button-menu calibration calibration-negative \
   cancel-zero cancel-prompt cancel-wait cancel-read calibration-failure \
