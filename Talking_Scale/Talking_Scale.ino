@@ -16,6 +16,8 @@
 #include "CalibrationCheck.h"
 #include "ScaleFilter.h"
 #include "CalibrationStore.h"
+#include "AnnouncementPolicy.h"
+#include "ModeVocabulary.h"
 
 #if !defined(__AVR_ATmega328P__) || F_CPU != 16000000UL
 #error This sketch requires a 16 MHz ATmega328P Nano or Uno with speech on D3.
@@ -40,6 +42,9 @@ Talkie voice(true, false);
 ScaleButton button;
 HX711 scale;
 ScaleFilter readingFilter;
+AnnouncementPolicy announcements;
+bool speakingMeasurement = false;
+int32_t spokenValue = 0;
 
 // The longest reading needs 17 words, including its sign and two decimal digits.
 const uint8_t MAX_PHRASE_WORDS = 20;
@@ -53,7 +58,7 @@ enum Operation {
   STARTUP_ZERO, WEIGHING, USER_ZERO, CALIBRATION_ZERO,
   CALIBRATION_PROMPT, CALIBRATION_WAIT, CALIBRATION_READ, CALIBRATION_COMMIT
 };
-enum MenuOption { NO_SELECTION, ZERO_WEIGHT, CALIBRATE };
+enum MenuOption { NO_SELECTION, ZERO_WEIGHT, CALIBRATE, ANNOUNCEMENTS };
 Operation operation = STARTUP_ZERO;
 MenuOption menuOption = NO_SELECTION;
 bool menu = false;
@@ -114,6 +119,7 @@ const uint8_t spAND[]      PROGMEM = {0xA9, 0x6B, 0x21, 0xB9, 0x22, 0x66, 0x9F, 
 // Stop the current word as well as the queued suffix. Protect Talkie's FIFO and
 // hardware reset from its audio ISR, preserving the caller's interrupt state.
 void startPhrase() {
+  speakingMeasurement = false;
   ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
     // Before the first word Talkie's output pin still holds an internal flag.
     if (voice.isTalking()) voice.terminate();
@@ -132,7 +138,11 @@ bool speechIdle() {
   return nextSpeechWord == speechLength && !voice.isTalking();
 }
 
-void serviceSpeech() {
+void serviceSpeech(unsigned long now) {
+  if (speakingMeasurement && speechIdle()) {
+    announcements.completed(spokenValue, static_cast<uint32_t>(now));
+    speakingMeasurement = false;
+  }
   // sayQ also blocks if its internal FIFO fills. Feed only one idle word at a time.
   if (!speechPaused && nextSpeechWord < speechLength && !voice.isTalking()) {
     voice.sayQ(speechWords[nextSpeechWord++]);
@@ -207,6 +217,9 @@ void queueReading(float grams) {
   queueWord(spPOINT);
   queueNumber(reading.tenths);
   queueNumber(reading.hundredths);
+  spokenValue = static_cast<int32_t>(reading.whole * 100 + reading.tenths * 10 + reading.hundredths);
+  if (reading.negative) spokenValue = -spokenValue;
+  speakingMeasurement = true;
 }
 
 bool validCalibration(float factor) {
@@ -214,6 +227,7 @@ bool validCalibration(float factor) {
 }
 
 void resetSamples() {
+  announcements.reset();
   readingFilter.reset();
   readingStable = stableWindow = false;
   sampleSum = 0;
@@ -415,20 +429,70 @@ void serviceScale(unsigned long now) {
   }
 }
 
+void queueMode() {
+  switch (announcements.mode()) {
+    case AnnouncementMode::Repeat: queueWord(spREPEAT); break;
+    case AnnouncementMode::Change: queueWord(spCHANGE); break;
+    case AnnouncementMode::Manual: queueWord(spMANUAL); break;
+  }
+}
+
+void loadMode() {
+  const uint8_t mode = EEPROM.read(6);
+  if (EEPROM.read(4) == 0xa6 && EEPROM.read(5) == 1 &&
+      EEPROM.read(7) == static_cast<uint8_t>(~mode) && mode < 3) {
+    announcements.setMode(static_cast<AnnouncementMode>(mode));
+  }
+}
+
+void saveMode() {
+  const uint8_t mode = static_cast<uint8_t>(announcements.mode());
+  EEPROM.update(4, 0);
+  EEPROM.update(5, 1);
+  EEPROM.update(6, mode);
+  EEPROM.update(7, static_cast<uint8_t>(~mode));
+  EEPROM.update(4, 0xa6);
+}
+
+bool shouldAnnounce(unsigned long now) {
+  SpokenReading reading;
+  if (!splitReading(latestReading, reading)) return true; // Report invalid data audibly.
+  int32_t value = static_cast<int32_t>(reading.whole * 100 + reading.tenths * 10 + reading.hundredths);
+  if (reading.negative) value = -value;
+  const bool settled = readingStable && now - stableSince >= ZERO_SETTLE_MS;
+  return announcements.shouldSpeak(value, settled, static_cast<uint32_t>(now));
+}
+
 void buttonClick() {
-  if (!menu || operation != WEIGHING) return;
-  menuOption = menuOption == ZERO_WEIGHT ? CALIBRATE : ZERO_WEIGHT;
+  if (operation != WEIGHING) return;
+  if (!menu) {
+    announcements.request();
+    return;
+  }
+  menuOption = menuOption == NO_SELECTION || menuOption == ANNOUNCEMENTS
+                 ? ZERO_WEIGHT : static_cast<MenuOption>(menuOption + 1);
   startPhrase();
   if (menuOption == ZERO_WEIGHT) {
     queueWord(spZERO);
     queueWord(spWEIGHT);
-  } else {
+  } else if (menuOption == CALIBRATE) {
     queueWord(spCALIBRATE);
+  } else {
+    queueWord(spCONTROL);
+    queueMode();
   }
 }
 
 void buttonDoubleClick() {
   if (!menu || operation != WEIGHING) return;
+  if (menuOption == ANNOUNCEMENTS) {
+    const uint8_t next = (static_cast<uint8_t>(announcements.mode()) + 1) % 3;
+    announcements.setMode(static_cast<AnnouncementMode>(next));
+    saveMode();
+    startPhrase();
+    queueMode();
+    return;
+  }
   if (sensorFault) {
     startPhrase();
     queueWord(spERROR);
@@ -482,6 +546,7 @@ void serviceButton(unsigned long now) {
 void setup() {
   Serial.begin(9600);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+  loadMode();
 
   scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
   float factor;
@@ -495,11 +560,12 @@ void setup() {
 void loop() {
   const unsigned long now = millis();
   serviceButton(now);
-  serviceSpeech();
+  serviceSpeech(now);
   serviceOperation(now);
   serviceScale(now);
   if (operation == WEIGHING && !menu && calibrated && !sensorFault &&
-      !button.busy() && !speechPaused && readingAvailable && speechIdle()) {
+      !button.busy() && !speechPaused && readingAvailable && speechIdle() &&
+      shouldAnnounce(now)) {
     queueReading(latestReading);
     readingAvailable = false;
   }

@@ -77,8 +77,8 @@ The window updates on every conversion, keeping adjustment feedback current.
 | --- | --- |
 | Press | Interrupt the current word after 30 ms of stable contact |
 | Hold for about one second | Enter or leave the menu; entering announces "set" |
-| Single click in the menu | Cycle between "zero weight" and "calibrate" |
-| Double click in the menu | Run the selected operation |
+| Single click in the menu | Cycle through "zero weight", "calibrate", and "control" |
+| Double click in the menu | Run the operation, or cycle the announcement mode under "control" |
 | Hold during a pending tare or calibration | Cancel it and leave the menu |
 
 Allow about 600 ms after releasing a single click for double-click detection.
@@ -88,6 +88,23 @@ until the gesture is resolved; a hold may announce its menu action while the
 button is still held. A short press outside the menu silences the old reading,
 then weighing resumes with a fresh reading. Startup zeroing must finish before
 entering the menu.
+
+The "control" menu item speaks the current announcement mode. Double click to
+cycle modes, then hold to return to weighing. The mode is saved separately from
+calibration and defaults to Repeat if its settings record is missing or invalid.
+
+| Mode | Behaviour |
+| --- | --- |
+| Repeat | Repeated readings, as before; this is the initial default |
+| Change | Speak settled values when their rounded hundredths change; repeat after 30 seconds of silence |
+| Manual | Speak a fresh averaged reading only when a short press is completed |
+
+A short press requests a repeat in Change mode too, after settling. Errors and
+calibration instructions remain audible in every mode. The previous value is
+acknowledged only after the entire announcement finishes; interrupting it does
+not mark it as heard. Tare, calibration, menu transitions, and sensor recovery
+reset announcement history. The new words "control", "repeat", "change", and
+"manual" are original VM61002 samples matching the existing number voice.
 
 To tare, select "zero weight" and double click. The scale fills the filtered
 window and requires stability for another 500 ms before announcing "zero".

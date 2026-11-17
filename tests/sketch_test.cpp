@@ -137,7 +137,9 @@ void testButtonAndMenu() {
   assert(menuOption == ZERO_WEIGHT);
   click();
   assert(menuOption == CALIBRATE);
-  click(); // The old recursive wrap skipped Zero Weight here.
+  click();
+  assert(menuOption == ANNOUNCEMENTS);
+  click(); // Wrap from speech settings back to Zero Weight.
   assert(menuOption == ZERO_WEIGHT);
   scale.raw = 2000;
   doubleClick();
@@ -392,6 +394,32 @@ void testUnstableTare() {
   assert(EEPROM.putCalls == 0);
 }
 
+void testAnnouncementModes() {
+  boot();
+  enterMenu();
+  click(); click(); click();
+  assert(menuOption == ANNOUNCEMENTS);
+  doubleClick();
+  assert(announcements.mode() == AnnouncementMode::Change);
+  doubleClick();
+  assert(announcements.mode() == AnnouncementMode::Manual);
+  longPress();
+  until([] { return speechIdle(); });
+  const size_t wordCount = voice.words.size();
+  advance(5000);
+  assert(voice.words.size() == wordCount);
+  click();
+  until([] { return speakingMeasurement; });
+  until([] { return !speakingMeasurement; });
+  assert(voice.words.size() > wordCount);
+  const size_t completed = voice.words.size();
+  advance(4000);
+  assert(voice.words.size() == completed);
+  announcements.setMode(AnnouncementMode::Repeat);
+  loadMode();
+  assert(announcements.mode() == AnnouncementMode::Manual);
+}
+
 int main(int argc, char **argv) {
   assert(argc == 2);
   const char *scenario = argv[1];
@@ -410,6 +438,7 @@ int main(int argc, char **argv) {
   else if (std::strcmp(scenario, "calibration-noise") == 0) testCalibrationRejectsNoise();
   else if (std::strcmp(scenario, "late-cancel") == 0) testLateCalibrationCancel();
   else if (std::strcmp(scenario, "unstable-tare") == 0) testUnstableTare();
+  else if (std::strcmp(scenario, "modes") == 0) testAnnouncementModes();
   else if (std::strcmp(scenario, "phrase-bound") == 0) testPhraseBound();
   else testInvalidEEPROM(scenario);
   std::printf("Sketch test passed: %s\n", scenario);
