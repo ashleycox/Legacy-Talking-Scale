@@ -31,10 +31,10 @@ Use these tested releases from Arduino Library Manager:
 | --- | --- | --- |
 | [Talkie](https://github.com/ArminJo/Talkie) | 1.4.0 | Armin Joachimsmeyer |
 | [HX711 Arduino Library](https://github.com/bogde/HX711) | 0.7.5 | Bogdan Necula |
-| [OneButton](https://github.com/mathertel/OneButton) | 2.6.2 | Matthias Hertel |
 
 Choose **HX711 Arduino Library**; the library named just **HX711** has a different
-API. EEPROM support comes from the Arduino AVR core; EEPROMEx is no longer needed.
+API. EEPROM support comes from the Arduino AVR core. EEPROMEx and OneButton are
+no longer needed; the button is handled directly in `ScaleButton.h`.
 The tested Arduino AVR Boards core is 1.8.8.
 
 For the Arduino IDE, move the old bundled libraries out of the sketchbook's
@@ -71,15 +71,19 @@ of 20 sensor conversions with two decimal digits.
 
 | Gesture | Action |
 | --- | --- |
+| Press | Interrupt the current word after 30 ms of stable contact |
 | Hold for about one second | Enter or leave the menu; entering announces "set" |
 | Single click in the menu | Cycle between "zero weight" and "calibrate" |
 | Double click in the menu | Run the selected operation |
 | Hold during a pending tare or calibration | Cancel it and leave the menu |
 
-Allow about 600 ms after a single click for double-click detection. Gestures work
-during speech and sensor sampling. A menu prompt replaces the remaining words
-of a measurement after the word currently playing finishes. Startup zeroing
-must finish before entering the menu.
+Allow about 600 ms after releasing a single click for double-click detection.
+Gestures work during speech and sensor sampling. A press stops the current word
+and discards the rest of that announcement. Measurement speech stays paused
+until the gesture is resolved; a hold may announce its menu action while the
+button is still held. A short press outside the menu silences the old reading,
+then weighing resumes with a fresh reading. Startup zeroing must finish before
+entering the menu.
 
 To tare, select "zero weight" and double click. The scale averages ten
 conversions and announces "zero". Hold to leave the menu and resume weighing.
@@ -91,6 +95,10 @@ To calibrate:
    the 5 g reference weight. Leave it still while 20 conversions are averaged.
 3. "Weight five" confirms that the factor was saved. Remove the reference weight
    before weighing another item.
+
+A short press during "put five" silences it and replays the full prompt after
+the gesture is resolved. The placement countdown waits for the replay to finish.
+A one-second hold cancels calibration as usual.
 
 When startup has already selected calibration after "error calibrate", double
 click to start it. A cancelled, zero-result, or interrupted calibration leaves
@@ -114,9 +122,21 @@ Number speech uses 32-bit values rather than AVR's 16-bit `int`.
 Speech uses Talkie's asynchronous API, feeding one word at a time so its FIFO
 cannot fill and block button polling. Ready sensor conversions are accumulated
 across loop iterations; tare, calibration, and the placement interval also run
-without long waits. OneButton needs no additional timer. On this Nano, Talkie
-uses timers 1 and 2 while `millis()` and OneButton use timer 0. The current HX711
-library protects its clock pulses from interrupt stretching.
+without long waits. The direct button handler uses `millis()` with no additional
+interrupt or timer. On this Nano, Talkie uses timers 1 and 2 while `millis()` uses
+timer 0. The current HX711 library protects its clock pulses from interrupt
+stretching. Immediate speech termination briefly disables interrupts around
+Talkie's state reset and restores their previous state afterwards.
+
+The speech buffer holds 20 word pointers; the longest supported reading needs
+17. Exhaustive tests check the bound for every whole number below one million.
+Removing OneButton and reducing the buffer gives these Nano build sizes with
+the same AVR core and speech libraries:
+
+| Resource | Previous version | Direct button version |
+| --- | ---: | ---: |
+| Flash | 14,172 bytes | 13,378 bytes |
+| Static RAM | 545 bytes | 452 bytes |
 
 The menu now wraps correctly back to "zero weight". EEPROM writes use the core's
 update-on-change `put` operation, and calibration is applied only after a valid
@@ -128,18 +148,17 @@ Run the host regression tests with:
 tests/run-tests.sh
 ```
 
-This requires a C++14 compiler and OneButton 2.6.2 installed in the standard
-Arduino sketchbook. For another location, set `ONEBUTTON_SOURCE_DIR` to the
-library's `src` directory when running the script.
+This requires a C++11 compiler and no installed Arduino libraries.
 
-These tests cover decimal speech, real OneButton gesture handling with simulated
-speech and sensor timing, menu cycling, calibration, and sensor recovery. They
-complement the Nano compilation; they do not simulate the AVR audio interrupt,
-analogue noise, or load-cell accuracy. Compiler warnings from the current HX711
+These tests cover decimal speech, button debounce and gesture timing (including
+clock rollover), immediate speech interruption, menu cycling, calibration, and
+sensor recovery. They complement the Nano compilation; they do not simulate the
+AVR audio interrupt, analogue noise, or load-cell accuracy. Compiler warnings from the current HX711
 library and AVR core may appear with `--warnings all`.
 
 Before relying on a flashed scale, check speech quality and single/double/long
-presses while it speaks, calibrate with 5 g, verify several known loads including
-hundredths, test tare and a negative reading, and power-cycle to confirm the
-calibration is retained. Speaking hundredths does not establish 0.01 g physical
+presses while it speaks, including any click caused by cutting a word short.
+Calibrate with 5 g, verify several known loads including hundredths, test tare
+and a negative reading, and power-cycle to confirm the calibration is retained.
+Speaking hundredths does not establish 0.01 g physical
 accuracy; that also depends on the load cell, calibration, and mechanical setup.

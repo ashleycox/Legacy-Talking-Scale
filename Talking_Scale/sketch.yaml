@@ -6,7 +6,6 @@ profiles:
     libraries:
       - Talkie (1.4.0)
       - HX711 Arduino Library (0.7.5)
-      - OneButton (2.6.2)
   nano:
     fqbn: arduino:avr:nano:cpu=atmega328
     platforms:
@@ -14,4 +13,3 @@ profiles:
     libraries:
       - Talkie (1.4.0)
       - HX711 Arduino Library (0.7.5)
-      - OneButton (2.6.2)

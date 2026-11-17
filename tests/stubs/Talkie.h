@@ -16,6 +16,7 @@ public:
   bool invertedOutput;
   unsigned long wordDurationMs = 150;
   std::vector<StartedWord> words;
+  std::vector<unsigned long> terminationTimes;
 
   Talkie(bool, bool inverted) : invertedOutput(inverted) {}
   bool isTalking() { return millis() < wordEndsAt; }
@@ -25,9 +26,12 @@ public:
     words.push_back({word, millis()});
     wordEndsAt = millis() + wordDurationMs;
   }
-  // Real Talkie discards queued words and lets its current word finish.
-  // This stub has no internal queue because the sketch feeds only idle words.
-  void stop() {}
+  void terminate() {
+    assert(!testInterruptsEnabled); // Reset must be protected from the audio ISR.
+    assert(isTalking()); // No hardware reset before the first word initializes D3.
+    terminationTimes.push_back(millis());
+    wordEndsAt = millis();
+  }
 };
 
 #endif

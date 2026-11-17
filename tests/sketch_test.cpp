@@ -7,6 +7,7 @@
 
 unsigned long testMillis = 0;
 int testButtonLevel = HIGH;
+bool testInterruptsEnabled = true;
 uint8_t configuredButtonPin = 255;
 uint8_t configuredButtonMode = 255;
 TestSerial Serial;
@@ -129,7 +130,7 @@ void testButtonAndMenu() {
   advance(600);
   assert(voice.isTalking());
   assert(sampleCount > 0 && sampleCount < READING_SAMPLES);
-  enterMenu(); // A real OneButton long press while speech and averaging run.
+  enterMenu(); // A long press while speech and averaging run.
   assert(voice.isTalking());
   assert(sampleCount == 0);
   click();
@@ -290,6 +291,67 @@ void testFaultedMenuExit() {
   assertOldCalibration();
 }
 
+void testSpeechInterruption() {
+  boot();
+  voice.wordDurationMs = 5000;
+  queueReading(1.27f);
+  advance(10);
+  assert(voice.isTalking());
+  const size_t started = voice.words.size();
+  const size_t stopped = voice.terminationTimes.size();
+  const unsigned long pressedAt = millis();
+  testButtonLevel = LOW;
+  advance(35);
+  assert(!voice.isTalking());
+  assert(speechLength == 0 && speechPaused);
+  assert(voice.terminationTimes.size() == stopped + 1);
+  assert(voice.terminationTimes.back() <= pressedAt + 31);
+  assert(testInterruptsEnabled);
+  advance(500);
+  assert(voice.words.size() == started); // No old suffix or fresh measurement while held.
+  testButtonLevel = HIGH;
+  advance(550);
+  assert(voice.words.size() == started); // Wait for the click/double-click decision.
+  advance(100);
+  assert(!speechPaused && !button.busy() && !menu);
+  until([=] { return voice.words.size() > started; });
+  assert(voice.words.back().data == spZERO); // A fresh zero reading, not old 1.27.
+
+  // Immediate cancellation must also preserve an already-disabled interrupt state.
+  testInterruptsEnabled = false;
+  startPhrase();
+  assert(!testInterruptsEnabled && !voice.isTalking());
+  testInterruptsEnabled = true;
+}
+
+void testInterruptedCalibrationPrompt() {
+  boot();
+  beginCalibration();
+  voice.wordDurationMs = 1200;
+  until([] { return operation == CALIBRATION_PROMPT && voice.isTalking(); });
+  const size_t firstPrompt = voice.words.size() - 1;
+  assert(voice.words.back().data == spPUT);
+  click();
+  assert(operation == CALIBRATION_PROMPT);
+  assert(placementStartedAt == 0);
+  waitForPlacement();
+  assert(voice.words.size() == firstPrompt + 3);
+  assert(voice.words[firstPrompt + 1].data == spPUT);
+  assert(voice.words[firstPrompt + 2].data == spFIVE);
+  assert(placementStartedAt == voice.words.back().at + voice.wordDurationMs);
+  assertOldCalibration();
+}
+
+void testPhraseBound() {
+  for (uint32_t value = 0; value < 1000000; ++value) {
+    startPhrase();
+    queueNumber(value);
+    assert(speechLength <= 13);
+    // Sign, point, and the two decimal digits must fit as well.
+    assert(speechLength + 4 <= MAX_PHRASE_WORDS);
+  }
+}
+
 int main(int argc, char **argv) {
   assert(argc == 2);
   const char *scenario = argv[1];
@@ -303,6 +365,9 @@ int main(int argc, char **argv) {
   else if (std::strcmp(scenario, "startup-timeout") == 0) testStartupTimeout();
   else if (std::strcmp(scenario, "sensor-recovery") == 0) testSensorRecovery();
   else if (std::strcmp(scenario, "fault-menu-exit") == 0) testFaultedMenuExit();
+  else if (std::strcmp(scenario, "interrupt") == 0) testSpeechInterruption();
+  else if (std::strcmp(scenario, "interrupt-calibration") == 0) testInterruptedCalibrationPrompt();
+  else if (std::strcmp(scenario, "phrase-bound") == 0) testPhraseBound();
   else testInvalidEEPROM(scenario);
   std::printf("Sketch test passed: %s\n", scenario);
 }

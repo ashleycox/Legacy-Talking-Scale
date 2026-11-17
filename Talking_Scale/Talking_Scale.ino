@@ -10,7 +10,8 @@
 #include <EEPROM.h>
 #include <Talkie.h>
 #include <HX711.h>
-#include <OneButton.h>
+#include <util/atomic.h>
+#include "ScaleButton.h"
 #include "ScaleReading.h"
 
 #if !defined(__AVR_ATmega328P__) || F_CPU != 16000000UL
@@ -27,17 +28,19 @@ const unsigned long WEIGHT_PLACEMENT_MS = 2000;
 const unsigned long SENSOR_TIMEOUT_MS = 3000;
 const int CALIBRATION_ADDRESS = 0; // Retains the legacy EEPROM float layout.
 
-// Talkie owns timers 1 and 2. At 16 MHz timer 0 still supplies millis() to OneButton.
+// Talkie owns timers 1 and 2. Timer 0 supplies millis() for button timing.
 // Disable Talkie's default inverted D11 output: the existing speaker uses D3/GND.
 Talkie voice(true, false);
-OneButton button;
+ScaleButton button;
 HX711 scale;
 
-// One phrase fits here, including readings up to 999999 grams and two decimals.
-const uint8_t MAX_PHRASE_WORDS = 32;
+// The longest reading needs 17 words, including its sign and two decimal digits.
+const uint8_t MAX_PHRASE_WORDS = 20;
 const uint8_t *speechWords[MAX_PHRASE_WORDS];
 uint8_t speechLength = 0;
 uint8_t nextSpeechWord = 0;
+bool speechPaused = false;
+bool restartCalibrationPrompt = false;
 
 enum Operation {
   STARTUP_ZERO, WEIGHING, USER_ZERO, CALIBRATION_ZERO,
@@ -91,9 +94,13 @@ const uint8_t spHUNDRED[]  PROGMEM = {0x04, 0xC8, 0x7E, 0x5C, 0x02, 0x0A, 0xA8, 
 const uint8_t spTHOUSAND[] PROGMEM = {0x0C, 0xE8, 0x2E, 0xD4, 0x02, 0x06, 0x98, 0xD2, 0x55, 0x03, 0x16, 0x68, 0x7D, 0x17, 0xE9, 0x6E, 0xBC, 0x65, 0x8C, 0x45, 0x6D, 0xA6, 0xE9, 0x96, 0xDD, 0xDE, 0xF6, 0xB6, 0xB7, 0x5E, 0x75, 0xD4, 0x93, 0xA5, 0x9C, 0x7B, 0x57, 0xB3, 0x6E, 0x7D, 0x12, 0x19, 0xAD, 0xDC, 0x29, 0x8D, 0x4F, 0x93, 0xB4, 0x87, 0xD2, 0xB6, 0xFC, 0xDD, 0xAC, 0x22, 0x56, 0x02, 0x70, 0x18, 0xCA, 0x18, 0x26, 0xB5, 0x90, 0xD4, 0xDE, 0x6B, 0x29, 0xDA, 0x2D, 0x25, 0x17, 0x8D, 0x79, 0x88, 0xD4, 0x48, 0x79, 0x5D, 0xF7, 0x74, 0x75, 0xA1, 0x94, 0xA9, 0xD1, 0xF2, 0xED, 0x9E, 0xAA, 0x51, 0xA6, 0xD4, 0x9E, 0x7F, 0xED, 0x6F, 0xFE, 0x2B, 0xD1, 0xC7, 0x3D, 0x89, 0xFA, 0xB7, 0x0D, 0x57, 0xD3, 0xB4, 0xF5, 0x37, 0x55, 0x37, 0x2E, 0xE6, 0xB2, 0xD7, 0x57, 0xFF, 0x0F};
 const uint8_t spAND[]      PROGMEM = {0xA9, 0x6B, 0x21, 0xB9, 0x22, 0x66, 0x9F, 0xAE, 0xC7, 0xE1, 0x70, 0x7B, 0x72, 0xBB, 0x5B, 0xDF, 0xEA, 0x56, 0xBB, 0x5C, 0x65, 0xCB, 0x66, 0xC5, 0x3D, 0x67, 0xD7, 0xAB, 0x6D, 0x2E, 0x64, 0x30, 0x93, 0xEE, 0xB1, 0xCD, 0x3D, 0x92, 0xB9, 0x9A, 0xDA, 0xB2, 0x8E, 0x40, 0x12, 0x9A, 0x6A, 0xEB, 0x96, 0x8F, 0x78, 0x98, 0xB3, 0x2A, 0xB4, 0xD3, 0x48, 0xAA, 0x2F, 0x7D, 0xA7, 0x7B, 0xFB, 0x0C, 0x73, 0x71, 0x5C, 0xCE, 0x6E, 0x5C, 0x52, 0x6C, 0x73, 0x79, 0x9A, 0x13, 0x4B, 0x89, 0x45, 0xE9, 0x6E, 0x49, 0x42, 0xA9, 0x57, 0xFF, 0x3F};
 
-// Replacing a phrase drops its unspoken suffix and lets the current word finish.
+// Stop the current word as well as the queued suffix. Protect Talkie's FIFO and
+// hardware reset from its audio ISR, preserving the caller's interrupt state.
 void startPhrase() {
-  voice.stop();
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    // Before the first word Talkie's output pin still holds an internal flag.
+    if (voice.isTalking()) voice.terminate();
+  }
   speechLength = 0;
   nextSpeechWord = 0;
 }
@@ -110,7 +117,7 @@ bool speechIdle() {
 
 void serviceSpeech() {
   // sayQ also blocks if its internal FIFO fills. Feed only one idle word at a time.
-  if (nextSpeechWord < speechLength && !voice.isTalking()) {
+  if (!speechPaused && nextSpeechWord < speechLength && !voice.isTalking()) {
     voice.sayQ(speechWords[nextSpeechWord++]);
   }
 }
@@ -244,6 +251,7 @@ void finishAverage(long average) {
     case CALIBRATION_ZERO:
       calibrationZero = average;
       operation = CALIBRATION_PROMPT;
+      restartCalibrationPrompt = false;
       startPhrase();
       queueWord(spPUT);
       queueNumber(static_cast<uint32_t>(CALIBRATION_WEIGHT_GRAMS));
@@ -278,10 +286,18 @@ void finishAverage(long average) {
 }
 
 void serviceOperation(unsigned long now) {
-  if (operation == CALIBRATION_PROMPT && speechIdle()) {
-    // Give the full placement interval after "put five" has finished speaking.
-    placementStartedAt = now;
-    operation = CALIBRATION_WAIT;
+  if (operation == CALIBRATION_PROMPT) {
+    if (speechPaused || button.busy()) return;
+    if (restartCalibrationPrompt) {
+      startPhrase();
+      queueWord(spPUT);
+      queueNumber(static_cast<uint32_t>(CALIBRATION_WEIGHT_GRAMS));
+      restartCalibrationPrompt = false;
+    } else if (speechIdle()) {
+      // Only a complete "put five" prompt starts the placement interval.
+      placementStartedAt = now;
+      operation = CALIBRATION_WAIT;
+    }
   } else if (operation == CALIBRATION_WAIT &&
              now - placementStartedAt >= WEIGHT_PLACEMENT_MS) {
     resetSamples();
@@ -377,15 +393,25 @@ void buttonPress() {
   }
 }
 
+void serviceButton(unsigned long now) {
+  const ButtonEvent event = button.update(digitalRead(BUTTON_PIN) == LOW, now);
+  if (event == ButtonEvent::Down) {
+    if (operation == CALIBRATION_PROMPT) restartCalibrationPrompt = true;
+    startPhrase();
+    speechPaused = true;
+    readingAvailable = false;
+  } else if (event != ButtonEvent::None) {
+    // A recognised hold may speak its menu feedback before the button is released.
+    speechPaused = false;
+    if (event == ButtonEvent::Click) buttonClick();
+    else if (event == ButtonEvent::DoubleClick) buttonDoubleClick();
+    else if (event == ButtonEvent::LongPress) buttonPress();
+  }
+}
+
 void setup() {
   Serial.begin(9600);
-  button.setup(BUTTON_PIN, INPUT_PULLUP, true);
-  button.attachClick(buttonClick);
-  button.attachDoubleClick(buttonDoubleClick);
-  button.attachLongPressStart(buttonPress);
-  button.setDebounceMs(50);
-  button.setClickMs(600);
-  button.setPressMs(1000);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
 
   scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
   float factor;
@@ -397,13 +423,13 @@ void setup() {
 }
 
 void loop() {
-  button.tick();
   const unsigned long now = millis();
+  serviceButton(now);
   serviceSpeech();
   serviceOperation(now);
   serviceScale(now);
   if (operation == WEIGHING && !menu && calibrated && !sensorFault &&
-      readingAvailable && speechIdle()) {
+      !button.busy() && !speechPaused && readingAvailable && speechIdle()) {
     queueReading(latestReading);
     readingAvailable = false;
   }
