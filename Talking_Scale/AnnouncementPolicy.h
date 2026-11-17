@@ -28,7 +28,9 @@ public:
   void request() { requested = true; }
 
   bool shouldSpeak(int32_t hundredths, bool settled, uint32_t now) const {
-    if (selectedMode == AnnouncementMode::Repeat) return true;
+    if (selectedMode == AnnouncementMode::Repeat) {
+      return requested || !hasCompleted || now - lastCompletedAt >= REPEAT_GAP_MS;
+    }
     if (selectedMode == AnnouncementMode::Manual) return requested;
 
     // Explicit repeats in Change mode still wait for a settled measurement.
@@ -46,6 +48,7 @@ public:
   }
 
 private:
+  static const uint32_t REPEAT_GAP_MS = 2000;
   static const uint32_t REMINDER_MS = 30000;
   AnnouncementMode selectedMode = AnnouncementMode::Repeat;
   int32_t lastCompleted = 0;

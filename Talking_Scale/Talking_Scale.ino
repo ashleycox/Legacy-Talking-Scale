@@ -20,6 +20,7 @@
 #include "ModeVocabulary.h"
 #include "SensorHealth.h"
 #include "DiagnosticConsole.h"
+#include "SpeechPlayback.h"
 
 #if !defined(__AVR_ATmega328P__) || F_CPU != 16000000UL
 #error This sketch requires a 16 MHz ATmega328P Nano or Uno with speech on D3.
@@ -41,6 +42,7 @@ CalibrationStore<EEPROMClass> calibrationStore(EEPROM);
 // Talkie owns timers 1 and 2. Timer 0 supplies millis() for button timing.
 // Disable Talkie's default inverted D11 output: the existing speaker uses D3/GND.
 Talkie voice(true, false);
+SpeechPlayback<Talkie, NanoSpeechOutput> playback(voice);
 ScaleButton button;
 HX711 scale;
 ScaleFilter readingFilter;
@@ -124,14 +126,11 @@ const uint8_t spHUNDRED[]  PROGMEM = {0x04, 0xC8, 0x7E, 0x5C, 0x02, 0x0A, 0xA8, 
 const uint8_t spTHOUSAND[] PROGMEM = {0x0C, 0xE8, 0x2E, 0xD4, 0x02, 0x06, 0x98, 0xD2, 0x55, 0x03, 0x16, 0x68, 0x7D, 0x17, 0xE9, 0x6E, 0xBC, 0x65, 0x8C, 0x45, 0x6D, 0xA6, 0xE9, 0x96, 0xDD, 0xDE, 0xF6, 0xB6, 0xB7, 0x5E, 0x75, 0xD4, 0x93, 0xA5, 0x9C, 0x7B, 0x57, 0xB3, 0x6E, 0x7D, 0x12, 0x19, 0xAD, 0xDC, 0x29, 0x8D, 0x4F, 0x93, 0xB4, 0x87, 0xD2, 0xB6, 0xFC, 0xDD, 0xAC, 0x22, 0x56, 0x02, 0x70, 0x18, 0xCA, 0x18, 0x26, 0xB5, 0x90, 0xD4, 0xDE, 0x6B, 0x29, 0xDA, 0x2D, 0x25, 0x17, 0x8D, 0x79, 0x88, 0xD4, 0x48, 0x79, 0x5D, 0xF7, 0x74, 0x75, 0xA1, 0x94, 0xA9, 0xD1, 0xF2, 0xED, 0x9E, 0xAA, 0x51, 0xA6, 0xD4, 0x9E, 0x7F, 0xED, 0x6F, 0xFE, 0x2B, 0xD1, 0xC7, 0x3D, 0x89, 0xFA, 0xB7, 0x0D, 0x57, 0xD3, 0xB4, 0xF5, 0x37, 0x55, 0x37, 0x2E, 0xE6, 0xB2, 0xD7, 0x57, 0xFF, 0x0F};
 const uint8_t spAND[]      PROGMEM = {0xA9, 0x6B, 0x21, 0xB9, 0x22, 0x66, 0x9F, 0xAE, 0xC7, 0xE1, 0x70, 0x7B, 0x72, 0xBB, 0x5B, 0xDF, 0xEA, 0x56, 0xBB, 0x5C, 0x65, 0xCB, 0x66, 0xC5, 0x3D, 0x67, 0xD7, 0xAB, 0x6D, 0x2E, 0x64, 0x30, 0x93, 0xEE, 0xB1, 0xCD, 0x3D, 0x92, 0xB9, 0x9A, 0xDA, 0xB2, 0x8E, 0x40, 0x12, 0x9A, 0x6A, 0xEB, 0x96, 0x8F, 0x78, 0x98, 0xB3, 0x2A, 0xB4, 0xD3, 0x48, 0xAA, 0x2F, 0x7D, 0xA7, 0x7B, 0xFB, 0x0C, 0x73, 0x71, 0x5C, 0xCE, 0x6E, 0x5C, 0x52, 0x6C, 0x73, 0x79, 0x9A, 0x13, 0x4B, 0x89, 0x45, 0xE9, 0x6E, 0x49, 0x42, 0xA9, 0x57, 0xFF, 0x3F};
 
-// Stop the current word as well as the queued suffix. Protect Talkie's FIFO and
-// hardware reset from its audio ISR, preserving the caller's interrupt state.
+// Stop synthesis immediately, then let the output bias ramp down before D3 is
+// released. A replacement phrase waits for that nonblocking ramp to finish.
 void startPhrase() {
   speakingMeasurement = false;
-  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-    // Before the first word Talkie's output pin still holds an internal flag.
-    if (voice.isTalking()) voice.terminate();
-  }
+  playback.stop(static_cast<uint32_t>(millis()));
   speechLength = 0;
   nextSpeechWord = 0;
 }
@@ -143,17 +142,24 @@ void queueWord(const uint8_t *word) {
 }
 
 bool speechIdle() {
-  return nextSpeechWord == speechLength && !voice.isTalking();
+  return nextSpeechWord == speechLength && !playback.busy();
 }
 
-void serviceSpeech(unsigned long now) {
+void serviceSpeech() {
+  const unsigned long now = millis(); // A button action may have just written EEPROM.
+  playback.service(static_cast<uint32_t>(now));
   if (speakingMeasurement && speechIdle()) {
-    announcements.completed(spokenValue, static_cast<uint32_t>(now));
+    if (playback.completed()) {
+      announcements.completed(spokenValue, static_cast<uint32_t>(now));
+    }
     speakingMeasurement = false;
   }
-  // sayQ also blocks if its internal FIFO fills. Feed only one idle word at a time.
-  if (!speechPaused && nextSpeechWord < speechLength && !voice.isTalking()) {
-    voice.sayQ(speechWords[nextSpeechWord++]);
+  // Queue the complete phrase with silent boundary words. Its maximum size fits
+  // Talkie's FIFO, preventing both starvation between words and a blocking fill.
+  if (!speechPaused && nextSpeechWord < speechLength && !playback.busy()) {
+    if (playback.beginPhrase(speechWords, speechLength, static_cast<uint32_t>(now))) {
+      nextSpeechWord = speechLength;
+    }
   }
 }
 
@@ -634,10 +640,11 @@ void setup() {
 }
 
 void loop() {
-  const unsigned long now = millis();
-  serviceButton(now);
-  serviceSpeech(now);
+  serviceButton(millis());
+  serviceSpeech();
+  unsigned long now = millis();
   serviceOperation(now);
+  now = millis(); // Calibration commits can take several EEPROM write cycles.
   serviceScale(now);
   serviceConsole(now);
   if (operation == WEIGHING && !menu && calibrated && !sensorFault &&

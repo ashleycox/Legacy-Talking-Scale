@@ -69,8 +69,8 @@ the menu instead of speaking invalid measurements.
 
 ## Controls
 
-The scale zeroes the empty platform at startup, then repeatedly speaks a rolling average of 20 filtered conversions with two
-decimal digits. A median of three rejects isolated spikes before averaging.
+The scale zeroes the empty platform at startup, then speaks a rolling average
+of 20 filtered conversions with two decimal digits. A median of three rejects isolated spikes before averaging.
 The window updates on every conversion, keeping adjustment feedback current.
 
 | Gesture | Action |
@@ -82,7 +82,8 @@ The window updates on every conversion, keeping adjustment feedback current.
 | Hold during a pending tare or calibration | Cancel it and leave the menu |
 
 Allow about 600 ms after releasing a single click for double-click detection.
-Gestures work during speech and sensor sampling. A press stops the current word
+Gestures work during speech and sensor sampling. A press stops synthesis
+immediately after debounce, ramps the output down,
 and discards the rest of that announcement. Measurement speech stays paused
 until the gesture is resolved; a hold may announce its menu action while the
 button is still held. A short press outside the menu silences the old reading,
@@ -95,7 +96,7 @@ calibration and defaults to Repeat if its settings record is missing or invalid.
 
 | Mode | Behaviour |
 | --- | --- |
-| Repeat | Repeated readings, as before; this is the initial default |
+| Repeat | Repeated readings with a two-second pause after each completed measurement; this is the initial default |
 | Change | Speak settled values when their rounded hundredths change; repeat after 30 seconds of silence |
 | Manual | Speak a fresh averaged reading only when a short press is completed |
 
@@ -151,14 +152,24 @@ now rounded once to integer hundredths and split into separate digits. This also
 handles negative readings below one gram, trailing zeroes, and rounding carry.
 Number speech uses 32-bit values rather than AVR's 16-bit `int`.
 
-Speech uses Talkie's asynchronous API, feeding one word at a time so its FIFO
-cannot fill and block button polling. Ready sensor conversions are accumulated
+Speech uses Talkie's asynchronous API with a complete phrase queued at once.
+The bounded phrase and silent boundary words fit its FIFO, avoiding both
+blocking fills and speaker output resets between words. `SpeechPlayback.h`
+provides a version-specific adapter for Talkie 1.4.0 and the 16 MHz ATmega328P.
+It starts synthesis with D3 disconnected, clears residual synthesis state with
+a silent preroll, and ramps PWM bias up before speech. A silent tail holds the
+output active while it ramps back to zero, then releases D3. Button cancellation
+uses the same nonblocking ramp-down. Ramp steps are limited even if polling
+is delayed by an EEPROM write. The installed Talkie library is unchanged.
+Ready sensor conversions are accumulated
 across loop iterations; tare, calibration, and the placement interval also run
 without long waits. The direct button handler uses `millis()` with no additional
 interrupt or timer. On this Nano, Talkie uses timers 1 and 2 while `millis()` uses
 timer 0. The current HX711 library protects its clock pulses from interrupt
-stretching. Immediate speech termination briefly disables interrupts around
-Talkie's state reset and restores their previous state afterwards.
+stretching. Timer1 is suspended during the ramps and pending compares are
+cleared before
+resuming; Timer0 remains available for button timing. The final Talkie state
+reset preserves the previous interrupt state.
 
 The speech buffer holds 20 word pointers; the longest supported reading needs
 17. Exhaustive tests check the bound for every whole number below one million.
@@ -166,8 +177,8 @@ Nano build sizes with the same AVR core and speech libraries:
 
 | Resource | Before direct button | Direct button only | Current software |
 | --- | ---: | ---: | ---: |
-| Flash | 14,172 bytes | 13,378 bytes | 20,538 bytes |
-| Static RAM | 545 bytes | 452 bytes | 885 bytes |
+| Flash | 14,172 bytes | 13,378 bytes | 21,650 bytes |
+| Static RAM | 545 bytes | 452 bytes | 937 bytes |
 
 The menu wraps back to "zero weight". Calibration is applied only after stable
 measurements and verified EEPROM writes. Journal records use byte updates,
@@ -190,7 +201,8 @@ analogue noise, or load-cell accuracy. Compiler warnings from the current HX711
 library and AVR core may appear with `--warnings all`.
 
 Before relying on a flashed scale, check speech quality and single/double/long
-presses while it speaks, including any click caused by cutting a word short.
+presses while it speaks. Verify phrase starts, endings, and interruptions on
+the physical speaker; host tests cannot establish the audible result.
 Calibrate with 5 g, verify several known loads including hundredths, test tare
 and a negative reading, and power-cycle to confirm the calibration is retained.
 Speaking hundredths does not establish 0.01 g physical accuracy; that also

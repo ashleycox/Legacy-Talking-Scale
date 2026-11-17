@@ -8,6 +8,9 @@
 unsigned long testMillis = 0;
 int testButtonLevel = HIGH;
 bool testInterruptsEnabled = true;
+bool NanoSpeechOutput::frozen = false;
+bool NanoSpeechOutput::connected = false;
+uint8_t NanoSpeechOutput::duty = 0;
 uint8_t configuredButtonPin = 255;
 uint8_t configuredButtonMode = 255;
 TestSerial Serial;
@@ -25,6 +28,12 @@ int digitalRead(uint8_t pin) {
 
 // Exercise the firmware itself rather than a second copy of its state machine.
 #include "../Talking_Scale/Talking_Scale.ino"
+
+bool testVocabularyWord(const uint8_t *word) {
+  const uint8_t *const vocabulary[] = {spPOINT, spSTART, spREADY, spERROR, spMINUS, spPUT, spCALIBRATE, spWEIGHT, spSET, spZERO, spONE, spTWO, spTHREE, spFOUR, spFIVE, spSIX, spSEVEN, spEIGHT, spNINE, spTEN, spELEVEN, spTWELVE, spTHIR_, spFIF_, sp_TEEN, spTWENTY, spT, spHUNDRED, spTHOUSAND, spAND, spCONTROL, spREPEAT, spCHANGE, spMANUAL};
+  for (const uint8_t *known : vocabulary) if (word == known) return true;
+  return false;
+}
 
 void advance(unsigned long duration) {
   for (unsigned long i = 0; i < duration; ++i) {
@@ -164,7 +173,7 @@ void testCalibration(bool negative) {
   assert(millis() - promptStarted >= 2400);
   assert(voice.words[voice.words.size() - 2].data == spPUT);
   assert(voice.words.back().data == spFIVE);
-  assert(placementStartedAt == voice.words.back().at + voice.wordDurationMs);
+  assert(placementStartedAt >= voice.words.back().at + voice.wordDurationMs);
   assert(placementStartedAt == millis());
   scale.raw = negative ? -8500 : 11500;
   advance(WEIGHT_PLACEMENT_MS - 1);
@@ -299,17 +308,21 @@ void testSpeechInterruption() {
   boot();
   voice.wordDurationMs = 5000;
   queueReading(1.27f);
-  advance(10);
+  const size_t beforeStart = voice.words.size();
+  until([=] { return voice.words.size() > beforeStart; });
   assert(voice.isTalking());
   const size_t started = voice.words.size();
   const size_t stopped = voice.terminationTimes.size();
   const unsigned long pressedAt = millis();
   testButtonLevel = LOW;
   advance(35);
-  assert(!voice.isTalking());
+  assert(NanoSpeechOutput::frozen); // Synthesis stops at the debounced press.
+  assert(millis() <= pressedAt + 35);
   assert(speechLength == 0 && speechPaused);
+  assert(voice.terminationTimes.size() == stopped); // Ramp first, then release D3.
+  advance(70);
+  assert(!voice.isTalking());
   assert(voice.terminationTimes.size() == stopped + 1);
-  assert(voice.terminationTimes.back() <= pressedAt + 31);
   assert(testInterruptsEnabled);
   advance(500);
   assert(voice.words.size() == started); // No old suffix or fresh measurement while held.
@@ -324,7 +337,7 @@ void testSpeechInterruption() {
   // Immediate cancellation must also preserve an already-disabled interrupt state.
   testInterruptsEnabled = false;
   startPhrase();
-  assert(!testInterruptsEnabled && !voice.isTalking());
+  assert(!testInterruptsEnabled && NanoSpeechOutput::frozen);
   testInterruptsEnabled = true;
 }
 
@@ -332,7 +345,8 @@ void testInterruptedCalibrationPrompt() {
   boot();
   beginCalibration();
   voice.wordDurationMs = 1200;
-  until([] { return operation == CALIBRATION_PROMPT && voice.isTalking(); });
+  until([] { return operation == CALIBRATION_PROMPT && !voice.words.empty() &&
+                        voice.words.back().data == spPUT; });
   const size_t firstPrompt = voice.words.size() - 1;
   assert(voice.words.back().data == spPUT);
   click();
@@ -342,7 +356,7 @@ void testInterruptedCalibrationPrompt() {
   assert(voice.words.size() == firstPrompt + 3);
   assert(voice.words[firstPrompt + 1].data == spPUT);
   assert(voice.words[firstPrompt + 2].data == spFIVE);
-  assert(placementStartedAt == voice.words.back().at + voice.wordDurationMs);
+  assert(placementStartedAt >= voice.words.back().at + voice.wordDurationMs);
   assertOldCalibration();
 }
 
@@ -491,6 +505,26 @@ void testRequestSurvivesClip() {
   until([] { return speakingMeasurement; });
 }
 
+void testRepeatGap(bool requestDuringGap) {
+  boot();
+  until([] { return speakingMeasurement; });
+  until([] { return !speakingMeasurement; });
+  const unsigned long finishedAt = millis();
+  const size_t words = voice.words.size();
+  if (requestDuringGap) {
+    advance(100);
+    click();
+    until([=] { return voice.words.size() > words; });
+    assert(millis() - finishedAt < 2000);
+  } else {
+    advance(1999);
+    assert(voice.words.size() == words && !playback.busy());
+    until([=] { return voice.words.size() > words; });
+    assert(voice.words[words].at - finishedAt >= 2000);
+  }
+  assert(testInterruptsEnabled);
+}
+
 int main(int argc, char **argv) {
   assert(argc == 2);
   const char *scenario = argv[1];
@@ -513,6 +547,8 @@ int main(int argc, char **argv) {
   else if (std::strcmp(scenario, "clipping") == 0) testClippedSensor();
   else if (std::strcmp(scenario, "console") == 0) testConsole();
   else if (std::strcmp(scenario, "clip-request") == 0) testRequestSurvivesClip();
+  else if (std::strcmp(scenario, "repeat-gap") == 0) testRepeatGap(false);
+  else if (std::strcmp(scenario, "gap-button") == 0) testRepeatGap(true);
   else if (std::strcmp(scenario, "phrase-bound") == 0) testPhraseBound();
   else testInvalidEEPROM(scenario);
   std::printf("Sketch test passed: %s\n", scenario);

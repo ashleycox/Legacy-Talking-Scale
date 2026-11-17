@@ -8,8 +8,11 @@ void testRepeat() {
   assert(policy.mode() == AnnouncementMode::Repeat);
   assert(policy.shouldSpeak(127, false, 0));
   policy.completed(127, 1000);
-  assert(policy.shouldSpeak(127, false, 1001));
-  assert(policy.shouldSpeak(-1, true, 1001));
+  assert(!policy.shouldSpeak(127, false, 1001));
+  assert(!policy.shouldSpeak(-1, true, 2999));
+  assert(policy.shouldSpeak(127, false, 3000));
+  policy.request();
+  assert(policy.shouldSpeak(127, false, 1001)); // Explicit requests bypass the pause.
 }
 
 void testChange() {
@@ -101,6 +104,10 @@ void testResetAndModeValidation() {
 
 void testRollover() {
   AnnouncementPolicy policy;
+  const uint32_t repeatCompletedAt = UINT32_MAX - 500;
+  policy.completed(200, repeatCompletedAt);
+  assert(!policy.shouldSpeak(200, true, repeatCompletedAt + 1999));
+  assert(policy.shouldSpeak(200, true, repeatCompletedAt + 2000));
   policy.setMode(AnnouncementMode::Change);
   const uint32_t completedAt = UINT32_MAX - 1000;
   policy.completed(200, completedAt);

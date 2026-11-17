@@ -25,6 +25,23 @@ void pinMode(uint8_t pin, uint8_t mode);
 int digitalRead(uint8_t pin);
 extern bool testInterruptsEnabled;
 
+struct NanoSpeechOutput {
+  static bool frozen;
+  static bool connected;
+  static uint8_t duty;
+  static void freeze() { frozen = true; }
+  static void resume() { frozen = false; }
+  static void attach(uint8_t value) { duty = value; connected = true; }
+  static void setDuty(uint8_t value) { duty = value; }
+  static uint8_t currentDuty() { return duty; }
+  template<class Function> static void atomic(Function function) {
+    const bool saved = testInterruptsEnabled;
+    testInterruptsEnabled = false;
+    function();
+    testInterruptsEnabled = saved;
+  }
+};
+
 class TestSerial : public Print {
 public:
   unsigned long baud = 0;
