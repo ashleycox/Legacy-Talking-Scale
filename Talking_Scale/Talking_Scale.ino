@@ -23,6 +23,8 @@
 #include "SensorHealth.h"
 #include "DiagnosticConsole.h"
 #include "SpeechPlayback.h"
+#include "StartupHold.h"
+#include "EEPROMReset.h"
 
 #if !defined(__AVR_ATmega328P__) || F_CPU != 16000000UL
 #error This sketch requires a 16 MHz ATmega328P Nano or Uno with speech on D3.
@@ -38,6 +40,12 @@ const unsigned long CALIBRATION_TIMEOUT_MS = 15000;
 const unsigned long ZERO_TIMEOUT_MS = 15000;
 const unsigned long ZERO_SETTLE_MS = 500;
 CalibrationStore<EEPROMClass> calibrationStore(EEPROM);
+EEPROMReset<EEPROMClass> eepromReset(EEPROM);
+StartupHold startupHold;
+enum class StartupState : uint8_t { Normal, ConfirmReset, Erasing, WaitRelease, ResetFailed };
+StartupState startupState = StartupState::Normal;
+bool resetReleasePending = false;
+unsigned long resetReleasedAt = 0;
 
 // Talkie owns timers 1 and 2. Timer 0 supplies millis() for button timing.
 // Disable Talkie's default inverted D11 output: the existing speaker uses D3/GND.
@@ -671,21 +679,85 @@ void serviceConsole(unsigned long now) {
   }
 }
 
-void setup() {
-  Serial.begin(9600);
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
+void beginStartup() {
+  // Loading can migrate legacy calibration, so defer it until any reset gesture
+  // is resolved and the erase marker has been cleared successfully.
+  announcements.setMode(AnnouncementMode::Repeat);
   loadMode();
-
-  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
   float factor;
   calibrated = calibrationStore.load(factor);
   scale.set_scale(calibrated ? factor : 1.0f);
+  scale.set_offset(0);
+  operation = STARTUP_ZERO;
+  sensorHealth = SensorHealth();
+  sensorFault = false;
+  speechPaused = false;
+  zeroTimeoutReported = false;
+  button = ScaleButton();
+  resetSamples();
   lastSampleAt = millis();
   operationStartedAt = lastSampleAt;
+  startupState = StartupState::Normal;
   // Tare the empty platform across loop iterations while still polling the button.
 }
 
+void resetFailed() {
+  // Never load or use EEPROM after a partially completed, unverified erase.
+  startupState = StartupState::ResetFailed;
+  startPhrase();
+  queueWord(spERROR);
+  queueWord(spFAIL);
+}
+
+bool serviceStartupReset(unsigned long now) {
+  if (startupState == StartupState::Normal) return false;
+  const bool pressed = digitalRead(BUTTON_PIN) == LOW;
+  if (startupState == StartupState::ConfirmReset) {
+    const StartupHoldResult result = startupHold.update(pressed, static_cast<uint32_t>(now));
+    if (result == StartupHoldResult::Cancelled) beginStartup();
+    else if (result == StartupHoldResult::Confirmed) {
+      if (eepromReset.begin()) startupState = StartupState::Erasing;
+      else resetFailed();
+    }
+  } else if (startupState == StartupState::Erasing) {
+    const EEPROMResetResult result = eepromReset.step();
+    if (result == EEPROMResetResult::Failed) resetFailed();
+    else if (result == EEPROMResetResult::Complete) {
+      startupState = StartupState::WaitRelease;
+      resetReleasePending = false;
+      startPhrase();
+      queueWord(spZERO);
+    }
+  } else if (startupState == StartupState::WaitRelease) {
+    if (pressed) resetReleasePending = false;
+    else if (!resetReleasePending) {
+      resetReleasePending = true;
+      resetReleasedAt = now;
+    } else if (now - resetReleasedAt >= 30 && speechIdle()) beginStartup();
+  }
+  return true;
+}
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+  if (eepromReset.pending()) {
+    // Finish an already authorized erase if power failed partway through it.
+    startupState = StartupState::Erasing;
+  } else {
+    const bool pressed = digitalRead(BUTTON_PIN) == LOW;
+    startupHold.begin(pressed, static_cast<uint32_t>(millis()));
+    if (pressed) startupState = StartupState::ConfirmReset;
+    else beginStartup();
+  }
+}
+
 void loop() {
+  if (serviceStartupReset(millis())) {
+    serviceSpeech();
+    return;
+  }
   serviceButton(millis());
   serviceSpeech();
   unsigned long now = millis();

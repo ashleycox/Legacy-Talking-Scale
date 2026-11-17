@@ -87,6 +87,7 @@ The window updates on every conversion, keeping adjustment feedback current.
 | Single click in the menu | Cycle through "zero weight", "calibrate", and "control" |
 | Double click in the menu | Run the operation, or cycle the announcement mode under "control" |
 | Hold during a pending tare or calibration | Cancel it and leave the menu |
+| Hold the button before switching on; keep holding for five seconds | Erase EEPROM, including calibration and the announcement mode |
 
 Allow about 600 ms after releasing a single click for double-click detection.
 Gestures work during speech and sensor sampling. A press stops synthesis
@@ -96,6 +97,21 @@ until the gesture is resolved; a hold may announce its menu action while the
 button is still held. A short press outside the menu silences the old reading,
 then weighing resumes with a fresh reading. Startup zeroing must finish before
 entering the menu.
+
+To clear a suspect calibration when startup cannot finish, switch the scale off,
+hold the button down, and switch it on again with the platform empty. Keep
+holding until it says "zero", then release. The five-second confirmation starts
+when the sketch runs, after any bootloader delay; erasing can take a few more
+seconds. Releasing before the five seconds cancels the reset and preserves the
+settings. A hold that starts after startup uses the normal menu controls.
+
+The reset erases and verifies all 1024 EEPROM bytes. It then starts with Repeat
+mode and no calibration. After startup zeroing it says "error calibrate" and
+selects calibration; double click to begin the normal 5 g calibration procedure.
+The reset hold cannot open the menu accidentally after erasure. An interrupted
+erase resumes automatically on the next startup before any settings are loaded.
+"Error fail" indicates an erase verification failure; settings are not used in
+that state. A power cycle retries an erase that already has its resume marker.
 
 The "control" menu item speaks the current announcement mode. Double click to
 cycle modes, then hold to return to weighing. The mode is saved separately from
@@ -197,8 +213,8 @@ Nano build sizes with the same AVR core and speech libraries:
 
 | Resource | Before direct button | Direct button only | Current software |
 | --- | ---: | ---: | ---: |
-| Flash | 14,172 bytes | 13,378 bytes | 24,260 bytes |
-| Static RAM | 545 bytes | 452 bytes | 1,026 bytes |
+| Flash | 14,172 bytes | 13,378 bytes | 24,984 bytes |
+| Static RAM | 545 bytes | 452 bytes | 1,043 bytes |
 
 The menu wraps back to "zero weight". Calibration is applied only after stable
 measurements and verified EEPROM writes. Journal records use byte updates,
@@ -215,7 +231,8 @@ This requires a C++11 compiler and no installed Arduino libraries.
 These tests cover decimal speech, button debounce and gesture timing (including
 clock rollover), immediate speech interruption, menu cycling, calibration,
 announcement modes, sensor recovery, noisy startup and calibration, and operation
-with serial output unavailable. EEPROM tests
+with serial output unavailable. Startup reset tests cover confirmation, early
+release, full erasure, interrupted erasure, and failed writes. EEPROM tests
 simulate interrupted and silently failed writes at each affected byte. They
 complement the Nano compilation; they do not simulate the AVR audio interrupt,
 analogue noise, or load-cell accuracy. Compiler warnings from the current HX711

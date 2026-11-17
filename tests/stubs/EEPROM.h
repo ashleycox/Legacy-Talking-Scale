@@ -8,11 +8,13 @@
 
 class TestEEPROM {
 public:
-  std::array<uint8_t, 64> bytes;
+  std::array<uint8_t, 1024> bytes;
   unsigned int putCalls = 0;
   unsigned int changedBytes = 0;
+  int failedAddress = -1;
 
   TestEEPROM() { bytes.fill(0xff); }
+  int length() const { return static_cast<int>(bytes.size()); }
 
   uint8_t read(int address) {
     assert(address >= 0 && static_cast<size_t>(address) < bytes.size());
@@ -20,6 +22,7 @@ public:
   }
   void update(int address, uint8_t value) {
     assert(address >= 0 && static_cast<size_t>(address) < bytes.size());
+    if (address == failedAddress) return;
     if (bytes[address] != value) { bytes[address] = value; ++changedBytes; }
   }
 

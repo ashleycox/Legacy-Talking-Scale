@@ -640,6 +640,114 @@ void testCalibrationFaultSpeech() {
   assertOldCalibration();
 }
 
+void assertErased() {
+  for (uint8_t value : EEPROM.bytes) assert(value == 0xff);
+}
+
+void testStartupReset() {
+  EEPROM.bytes.fill(0x35);
+  EEPROM.seed(1.0e-20f); // A finite but unusably small saved calibration.
+  announcements.setMode(AnnouncementMode::Manual);
+  saveMode();
+  const auto original = EEPROM.bytes;
+  testButtonLevel = LOW;
+  setup();
+  assert(startupState == StartupState::ConfirmReset && !calibrated);
+  advance(4999);
+  assert(EEPROM.bytes == original && scale.readCount == 0 && !sensorFault);
+  assert(voice.words.empty());
+  advance(1);
+  assert(startupState == StartupState::Erasing && eepromReset.pending());
+  until([] { return startupState == StartupState::WaitRelease; });
+  assertErased();
+  assert(scale.readCount == 0 && !sensorFault && !menu);
+  const unsigned int writes = EEPROM.changedBytes;
+  advance(10000); // Continuing to hold cannot erase twice or open the menu.
+  assert(startupState == StartupState::WaitRelease && EEPROM.changedBytes == writes);
+  assert(!voice.words.empty() && voice.words.back().data == spZERO);
+  testButtonLevel = HIGH;
+  advance(30);
+  assert(startupState == StartupState::WaitRelease);
+  advance(1);
+  assert(startupState == StartupState::Normal && scale.readCount == 0);
+  until([] { return operation == WEIGHING; });
+  assert(!calibrated && menu && menuOption == CALIBRATE);
+  assert(announcements.mode() == AnnouncementMode::Repeat && scale.get_scale() == 1.0f);
+  assertErased();
+
+  // The cleared scale can calibrate directly from the selected menu item.
+  doubleClick();
+  assert(operation == CALIBRATION_ZERO);
+  scale.raw = 1500;
+  waitForPlacement();
+  scale.raw = 11500;
+  until([] { return operation == WEIGHING; });
+  assert(calibrated && !menu && scale.get_scale() == 2000.0f);
+}
+
+void testCancelledStartupReset() {
+  EEPROM.seed(7000.0f);
+  assert(calibrationStore.save(2000.0f));
+  announcements.setMode(AnnouncementMode::Change);
+  saveMode();
+  const auto original = EEPROM.bytes;
+  testButtonLevel = LOW;
+  setup();
+  advance(4999);
+  assert(EEPROM.bytes == original && scale.readCount == 0);
+  testButtonLevel = HIGH;
+  advance(1);
+  assert(startupState == StartupState::Normal);
+  until([] { return operation == WEIGHING; });
+  assert(EEPROM.bytes == original && calibrated && scale.get_scale() == 2000.0f);
+  assert(announcements.mode() == AnnouncementMode::Change && !menu);
+}
+
+void testResumedStartupReset() {
+  EEPROM.bytes.fill(0x35);
+  EEPROM.bytes[9] = 0x52; // A previously confirmed reset interrupted by power loss.
+  setup();
+  assert(startupState == StartupState::Erasing && !calibrated);
+  until([] { return startupState == StartupState::WaitRelease; });
+  assertErased();
+  assert(scale.readCount == 0 && !sensorFault);
+  until([] { return startupState == StartupState::Normal; });
+  until([] { return operation == WEIGHING; });
+  assert(!calibrated && menu && menuOption == CALIBRATE);
+  assertErased();
+}
+
+void testFailedStartupReset(bool markerFailure) {
+  EEPROM.bytes.fill(0x35);
+  const auto original = EEPROM.bytes;
+  EEPROM.failedAddress = markerFailure ? 9 : 100;
+  testButtonLevel = LOW;
+  setup();
+  until([] { return startupState == StartupState::ResetFailed; });
+  assert(!calibrated && scale.readCount == 0 && !sensorFault);
+  if (markerFailure) assert(EEPROM.bytes == original && !eepromReset.pending());
+  else assert(eepromReset.pending() && EEPROM.bytes[100] == 0x35);
+  testButtonLevel = HIGH;
+  until([] { return speechIdle(); });
+  assert(voice.words.size() == 2 && voice.words[0].data == spERROR);
+  assert(voice.words[1].data == spFAIL);
+  const unsigned int writes = EEPROM.changedBytes;
+  advance(5000);
+  assert(startupState == StartupState::ResetFailed && scale.readCount == 0);
+  assert(EEPROM.changedBytes == writes);
+}
+
+void testLateResetHold() {
+  boot();
+  const auto original = EEPROM.bytes;
+  testButtonLevel = LOW;
+  advance(10000);
+  testButtonLevel = HIGH;
+  advance(100);
+  assert(startupState == StartupState::Normal && operation == WEIGHING && menu);
+  assert(calibrated && EEPROM.bytes == original && !eepromReset.pending());
+}
+
 int main(int argc, char **argv) {
   assert(argc == 2);
   const char *scenario = argv[1];
@@ -669,6 +777,12 @@ int main(int argc, char **argv) {
   else if (std::strcmp(scenario, "calibration-jitter") == 0) testNoisyCalibration();
   else if (std::strcmp(scenario, "calibration-details") == 0) testCalibrationFailureDetails();
   else if (std::strcmp(scenario, "calibration-fault-speech") == 0) testCalibrationFaultSpeech();
+  else if (std::strcmp(scenario, "reset-confirm") == 0) testStartupReset();
+  else if (std::strcmp(scenario, "reset-cancel") == 0) testCancelledStartupReset();
+  else if (std::strcmp(scenario, "reset-resume") == 0) testResumedStartupReset();
+  else if (std::strcmp(scenario, "reset-failure") == 0) testFailedStartupReset(false);
+  else if (std::strcmp(scenario, "reset-marker-failure") == 0) testFailedStartupReset(true);
+  else if (std::strcmp(scenario, "reset-latepress") == 0) testLateResetHold();
   else if (std::strcmp(scenario, "phrase-bound") == 0) testPhraseBound();
   else testInvalidEEPROM(scenario);
   std::printf("Sketch test passed: %s\n", scenario);

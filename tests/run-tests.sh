@@ -15,6 +15,14 @@ compiler=${CXX:-c++}
 "$build_dir/button-test"
 
 "$compiler" -std=c++11 -Wall -Wextra -Werror -pedantic \
+  "$test_dir/startup_hold_test.cpp" -o "$build_dir/startup-hold-test"
+"$build_dir/startup-hold-test"
+
+"$compiler" -std=c++11 -Wall -Wextra -Werror -pedantic \
+  "$test_dir/eeprom_reset_test.cpp" -o "$build_dir/eeprom-reset-test"
+"$build_dir/eeprom-reset-test"
+
+"$compiler" -std=c++11 -Wall -Wextra -Werror -pedantic \
   -D__AVR_ATmega328P__ -DF_CPU=16000000UL \
   -I "$test_dir/stubs" \
   "$test_dir/sketch_test.cpp" \
@@ -59,6 +67,7 @@ for scenario in speech button-menu calibration calibration-negative \
   startup-timeout startup-jitter standalone sensor-recovery fault-menu-exit interrupt interrupt-calibration \
   phrase-bound calibration-noise late-cancel unstable-tare modes clipping \
   clip-request console repeat-gap gap-button calibration-jitter calibration-details \
-  calibration-fault-speech; do
+  calibration-fault-speech reset-confirm reset-cancel reset-resume reset-failure \
+  reset-marker-failure reset-latepress; do
   "$build_dir/sketch-test" "$scenario"
 done
