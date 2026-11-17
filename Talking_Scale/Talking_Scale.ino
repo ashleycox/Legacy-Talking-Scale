@@ -14,6 +14,7 @@
 #include "ScaleButton.h"
 #include "ScaleReading.h"
 #include "CalibrationCheck.h"
+#include "ScaleFilter.h"
 
 #if !defined(__AVR_ATmega328P__) || F_CPU != 16000000UL
 #error This sketch requires a 16 MHz ATmega328P Nano or Uno with speech on D3.
@@ -28,6 +29,8 @@ const float CALIBRATION_WEIGHT_GRAMS = 5.0f;
 const unsigned long WEIGHT_PLACEMENT_MS = 2000;
 const unsigned long SENSOR_TIMEOUT_MS = 3000;
 const unsigned long CALIBRATION_TIMEOUT_MS = 15000;
+const unsigned long ZERO_TIMEOUT_MS = 15000;
+const unsigned long ZERO_SETTLE_MS = 500;
 const int CALIBRATION_ADDRESS = 0; // Retains the legacy EEPROM float layout.
 
 // Talkie owns timers 1 and 2. Timer 0 supplies millis() for button timing.
@@ -35,6 +38,7 @@ const int CALIBRATION_ADDRESS = 0; // Retains the legacy EEPROM float layout.
 Talkie voice(true, false);
 ScaleButton button;
 HX711 scale;
+ScaleFilter readingFilter;
 
 // The longest reading needs 17 words, including its sign and two decimal digits.
 const uint8_t MAX_PHRASE_WORDS = 20;
@@ -55,6 +59,10 @@ bool menu = false;
 bool calibrated = false;
 bool sensorFault = false;
 bool readingAvailable = false;
+bool readingStable = false;
+bool stableWindow = false;
+bool zeroTimeoutReported = false;
+unsigned long stableSince = 0;
 float latestReading = 0.0f;
 long sampleSum = 0;
 uint8_t sampleCount = 0;
@@ -205,6 +213,8 @@ bool validCalibration(float factor) {
 }
 
 void resetSamples() {
+  readingFilter.reset();
+  readingStable = stableWindow = false;
   sampleSum = 0;
   sampleCount = 0;
   readingAvailable = false;
@@ -227,6 +237,7 @@ void beginOperation(Operation next) {
   resetSamples();
   operation = next;
   operationStartedAt = millis();
+  zeroTimeoutReported = false;
 }
 
 void calibrationFailed() {
@@ -289,6 +300,17 @@ void finishAverage(long average) {
 }
 
 void serviceOperation(unsigned long now) {
+  if ((operation == STARTUP_ZERO || operation == USER_ZERO) &&
+      now - operationStartedAt >= ZERO_TIMEOUT_MS && !zeroTimeoutReported) {
+    zeroTimeoutReported = true;
+    if (operation == USER_ZERO) {
+      operation = WEIGHING;
+      resetSamples();
+    }
+    startPhrase();
+    queueWord(spERROR);
+  }
+
   if ((operation == CALIBRATION_ZERO || operation == CALIBRATION_READ) &&
       now - operationStartedAt >= CALIBRATION_TIMEOUT_MS) {
     calibrationFailed();
@@ -357,6 +379,21 @@ void serviceScale(unsigned long now) {
   if (operation == CALIBRATION_PROMPT || operation == CALIBRATION_WAIT ||
       operation == CALIBRATION_COMMIT ||
       (operation == WEIGHING && (menu || !calibrated))) return;
+
+  if (operation == STARTUP_ZERO || operation == USER_ZERO || operation == WEIGHING) {
+    readingFilter.add(static_cast<int32_t>(raw), static_cast<uint32_t>(now));
+    readingStable = readingFilter.stable(scale.get_scale(), calibrated);
+    if (!readingStable) stableWindow = false;
+    else if (!stableWindow) {
+      stableWindow = true;
+      stableSince = now;
+    }
+    if (!readingFilter.ready()) return;
+    if (operation != WEIGHING &&
+        (!readingStable || now - stableSince < ZERO_SETTLE_MS)) return;
+    finishAverage(readingFilter.mean());
+    return;
+  }
 
   if (sampleCount == 0) sampleMinimum = sampleMaximum = raw;
   if (raw < sampleMinimum) sampleMinimum = raw;
@@ -448,6 +485,7 @@ void setup() {
   calibrated = validCalibration(factor);
   scale.set_scale(calibrated ? factor : 1.0f);
   lastSampleAt = millis();
+  operationStartedAt = lastSampleAt;
   // Tare the empty platform across loop iterations while still polling the button.
 }
 

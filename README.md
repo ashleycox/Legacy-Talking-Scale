@@ -66,8 +66,9 @@ the menu instead of speaking invalid measurements.
 
 ## Controls
 
-The scale zeroes the empty platform at startup, then repeatedly speaks averages
-of 20 sensor conversions with two decimal digits.
+The scale zeroes the empty platform at startup, then repeatedly speaks a rolling average of 20 filtered conversions with two
+decimal digits. A median of three rejects isolated spikes before averaging.
+The window updates on every conversion, keeping adjustment feedback current.
 
 | Gesture | Action |
 | --- | --- |
@@ -85,8 +86,10 @@ button is still held. A short press outside the menu silences the old reading,
 then weighing resumes with a fresh reading. Startup zeroing must finish before
 entering the menu.
 
-To tare, select "zero weight" and double click. The scale averages ten
-conversions and announces "zero". Hold to leave the menu and resume weighing.
+To tare, select "zero weight" and double click. The scale fills the filtered
+window and requires stability for another 500 ms before announcing "zero".
+If it cannot settle within 15 seconds, it announces "error" and keeps the old
+zero. Startup uses the same settling check and continues waiting after an error. Hold to leave the menu and resume weighing.
 
 To calibrate:
 
@@ -167,3 +170,9 @@ Calibrate with 5 g, verify several known loads including hundredths, test tare
 and a negative reading, and power-cycle to confirm the calibration is retained.
 Speaking hundredths does not establish 0.01 g physical
 accuracy; that also depends on the load cell, calibration, and mechanical setup.
+
+Stability uses a full-window spread of at most 0.01 g (with a two-count minimum).
+Before calibration, a provisional 4096-count limit permits initial zeroing;
+calibration then checks both windows against the measured grams-per-count
+relationship. The limits in `ScaleFilter.h` and `CalibrationCheck.h` should be
+checked against USB sample logs. The software never adjusts zero automatically.

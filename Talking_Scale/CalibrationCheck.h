@@ -13,7 +13,7 @@ struct SampleSummary {
 // The gram limit is the full peak-to-peak spread, not a change-detection deadband.
 const float CALIBRATION_STABILITY_GRAMS = 0.01f;
 const uint32_t CALIBRATION_MIN_STABLE_COUNTS = 2;
-const uint32_t CALIBRATION_UNCALIBRATED_SPREAD = 64;
+const uint32_t CALIBRATION_UNCALIBRATED_SPREAD = 4096;
 const uint32_t CALIBRATION_MIN_SIGNAL_COUNTS = 32;
 const uint32_t CALIBRATION_NOISE_MULTIPLIER = 10;
 

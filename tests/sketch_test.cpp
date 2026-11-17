@@ -129,10 +129,10 @@ void testButtonAndMenu() {
   queueReading(1.27f);
   advance(600);
   assert(voice.isTalking());
-  assert(sampleCount > 0 && sampleCount < READING_SAMPLES);
+  assert(readingFilter.count() > 0);
   enterMenu(); // A long press while speech and averaging run.
   assert(voice.isTalking());
-  assert(sampleCount == 0);
+  assert(readingFilter.count() == 0);
   click();
   assert(menuOption == ZERO_WEIGHT);
   click();
@@ -261,17 +261,18 @@ void testSensorRecovery() {
   boot();
   scale.raw = 2000;
   advance(600);
-  assert(sampleCount > 0 && sampleCount < READING_SAMPLES);
+  assert(readingFilter.count() > 0);
   scale.connected = false;
   advance(SENSOR_TIMEOUT_MS + 1);
-  assert(sensorFault && sampleCount == 0);
+  assert(sensorFault && readingFilter.count() == 0);
   assertOldCalibration();
   scale.raw = 3000;
   scale.connected = true;
   const unsigned int readCount = scale.readCount;
-  until([=] { return scale.readCount == readCount + READING_SAMPLES - 1; });
-  assert(!sensorFault && latestReading == 0.0f);
-  until([=] { return scale.readCount == readCount + READING_SAMPLES; });
+  const float beforeRecovery = latestReading;
+  until([=] { return scale.readCount == readCount + READING_SAMPLES + 1; });
+  assert(!sensorFault && latestReading == beforeRecovery);
+  until([=] { return scale.readCount == readCount + READING_SAMPLES + 2; });
   assert(latestReading == 2.0f); // No stale samples from before disconnection.
 }
 
@@ -376,6 +377,21 @@ void testLateCalibrationCancel() {
   advance(50);
 }
 
+void testUnstableTare() {
+  boot();
+  enterMenu();
+  click();
+  doubleClick();
+  assert(operation == USER_ZERO);
+  for (unsigned int i = 0; i < 155; ++i) {
+    scale.raw = (i % 2) ? 2000 : 3000;
+    advance(100);
+  }
+  assert(operation == WEIGHING && menu);
+  assert(scale.get_offset() == 1000);
+  assert(EEPROM.putCalls == 0);
+}
+
 int main(int argc, char **argv) {
   assert(argc == 2);
   const char *scenario = argv[1];
@@ -393,6 +409,7 @@ int main(int argc, char **argv) {
   else if (std::strcmp(scenario, "interrupt-calibration") == 0) testInterruptedCalibrationPrompt();
   else if (std::strcmp(scenario, "calibration-noise") == 0) testCalibrationRejectsNoise();
   else if (std::strcmp(scenario, "late-cancel") == 0) testLateCalibrationCancel();
+  else if (std::strcmp(scenario, "unstable-tare") == 0) testUnstableTare();
   else if (std::strcmp(scenario, "phrase-bound") == 0) testPhraseBound();
   else testInvalidEEPROM(scenario);
   std::printf("Sketch test passed: %s\n", scenario);

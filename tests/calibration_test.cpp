@@ -15,7 +15,7 @@ void testStoredFactors() {
 
 void testStability() {
   assert(stableCalibrationWindow({1000, 64}, 0.0f, false));
-  assert(!stableCalibrationWindow({1000, 65}, 0.0f, false));
+  assert(!stableCalibrationWindow({1000, CALIBRATION_UNCALIBRATED_SPREAD + 1}, 0.0f, false));
   assert(stableCalibrationWindow({1000, 10}, 1000.0f, true));
   assert(stableCalibrationWindow({1000, 10}, -1000.0f, true));
   assert(!stableCalibrationWindow({1000, 11}, 1000.0f, true));
