@@ -19,6 +19,7 @@
 #include "AnnouncementPolicy.h"
 #include "ModeVocabulary.h"
 #include "SensorHealth.h"
+#include "DiagnosticConsole.h"
 
 #if !defined(__AVR_ATmega328P__) || F_CPU != 16000000UL
 #error This sketch requires a 16 MHz ATmega328P Nano or Uno with speech on D3.
@@ -44,6 +45,11 @@ ScaleButton button;
 HX711 scale;
 ScaleFilter readingFilter;
 SensorHealth sensorHealth;
+DiagnosticConsole console;
+ConsoleCommand pendingCommand = ConsoleCommand::None;
+bool diagnosticStream = false;
+unsigned long lastDiagnosticAt = 0;
+long latestRaw = 0;
 AnnouncementPolicy announcements;
 bool speakingMeasurement = false;
 int32_t spokenValue = 0;
@@ -313,7 +319,6 @@ void finishAverage(long average) {
     case WEIGHING:
       latestReading = (average - scale.get_offset()) / scale.get_scale();
       readingAvailable = true;
-      Serial.println(latestReading, 2);
       break;
     default:
       break;
@@ -351,8 +356,6 @@ void serviceOperation(unsigned long now) {
     startPhrase();
     queueWord(spWEIGHT);
     queueNumber(static_cast<uint32_t>(CALIBRATION_WEIGHT_GRAMS));
-    Serial.print(F("Calibration factor: "));
-    Serial.println(candidateCalibration, 6);
   }
 
   if (operation == CALIBRATION_PROMPT) {
@@ -388,7 +391,6 @@ void serviceScale(unsigned long now) {
     if (!sensorFault && now - lastSampleAt >= SENSOR_TIMEOUT_MS) {
       sensorHealth.timeout();
       reportSensorFault();
-      Serial.println(F("HX711 not ready; check the sensor."));
     }
     return;
   }
@@ -396,11 +398,11 @@ void serviceScale(unsigned long now) {
   // bogde HX711 protects the clock pulses from Talkie's ISR on AVR.
   // Read just one ready conversion; never wait for a 20-conversion batch.
   const long raw = scale.read();
+  latestRaw = raw;
   lastSampleAt = now;
   const SensorSample health = sensorHealth.add(static_cast<int32_t>(raw));
   if (health == SensorSample::Fault) {
     reportSensorFault();
-    Serial.println(F("HX711 signal is clipped."));
     return;
   }
   if (health == SensorSample::Reject) {
@@ -566,6 +568,57 @@ void serviceButton(unsigned long now) {
   }
 }
 
+void queueDiagnostics(unsigned long now) {
+  SpokenReading diagnosticReading;
+  const bool valid = calibrated && !sensorFault && readingFilter.ready() &&
+                     operation == WEIGHING && !menu && splitReading(latestReading, diagnosticReading);
+  console.beginMessage();
+  console.print(F("raw=")); console.print(latestRaw);
+  console.print(F(" mean=")); console.print(readingFilter.mean());
+  console.print(F(" g="));
+  if (valid) console.print(latestReading, 4); else console.print(F("na"));
+  console.print(F(" spread=")); console.print(readingFilter.spread());
+  console.print(F(" stable=")); console.print(readingStable ? 1 : 0);
+  console.print(F(" zero=")); console.print(scale.get_offset());
+  console.print(F(" net=")); console.print(readingFilter.mean() - scale.get_offset());
+  console.print(F(" factor=")); console.print(scale.get_scale(), 4);
+  console.print(F(" valid=")); console.print(valid ? 1 : 0);
+  console.print(F(" op=")); console.print(static_cast<uint8_t>(operation));
+  console.print(F(" fault=")); console.print(sensorFault ? (sensorHealth.clipped() ? 2 : 1) : 0);
+  console.print(F(" mode=")); console.print(static_cast<uint8_t>(announcements.mode()));
+  console.print(F(" age=")); console.println(now - lastSampleAt);
+}
+
+void serviceConsole(unsigned long now) {
+  // Process no more than 16 received bytes per loop, even under continuous input.
+  for (uint8_t budget = 0; budget < 16 && Serial.available() > 0; ++budget) {
+    const ConsoleCommand command = console.feed(static_cast<char>(Serial.read()));
+    if (command != ConsoleCommand::None) {
+      if (command == ConsoleCommand::StreamOn) diagnosticStream = true;
+      if (command == ConsoleCommand::StreamOff) diagnosticStream = false;
+      pendingCommand = command; // Coalesce requests if the output port is busy.
+    }
+  }
+  console.drain(Serial);
+  if (console.pending()) return;
+  if (pendingCommand != ConsoleCommand::None) {
+    if (pendingCommand == ConsoleCommand::Help) {
+      console.beginMessage();
+      console.println(F("help | status | raw | stream on | stream off; 9600 baud; snapshots at most 5 Hz"));
+    } else if (pendingCommand == ConsoleCommand::Invalid) {
+      console.beginMessage();
+      console.println(F("error: unknown or oversized command; use help"));
+    } else {
+      queueDiagnostics(now);
+    }
+    pendingCommand = ConsoleCommand::None;
+    lastDiagnosticAt = now;
+  } else if (diagnosticStream && now - lastDiagnosticAt >= 200) {
+    queueDiagnostics(now);
+    lastDiagnosticAt = now;
+  }
+}
+
 void setup() {
   Serial.begin(9600);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -586,6 +639,7 @@ void loop() {
   serviceSpeech(now);
   serviceOperation(now);
   serviceScale(now);
+  serviceConsole(now);
   if (operation == WEIGHING && !menu && calibrated && !sensorFault &&
       !button.busy() && !speechPaused && readingAvailable && speechIdle() &&
       shouldAnnounce(now)) {

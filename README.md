@@ -162,17 +162,16 @@ Talkie's state reset and restores their previous state afterwards.
 
 The speech buffer holds 20 word pointers; the longest supported reading needs
 17. Exhaustive tests check the bound for every whole number below one million.
-Removing OneButton and reducing the buffer gives these Nano build sizes with
-the same AVR core and speech libraries:
+Nano build sizes with the same AVR core and speech libraries:
 
-| Resource | Previous version | Direct button version |
-| --- | ---: | ---: |
-| Flash | 14,172 bytes | 13,378 bytes |
-| Static RAM | 545 bytes | 452 bytes |
+| Resource | Before direct button | Direct button only | Current software |
+| --- | ---: | ---: | ---: |
+| Flash | 14,172 bytes | 13,378 bytes | 20,538 bytes |
+| Static RAM | 545 bytes | 452 bytes | 885 bytes |
 
-The menu now wraps correctly back to "zero weight". EEPROM writes use the core's
-update-on-change `put` operation, and calibration is applied only after a valid
-result is available.
+The menu wraps back to "zero weight". Calibration is applied only after stable
+measurements and verified EEPROM writes. Journal records use byte updates,
+version checks, CRC16, and readback; failed writes preserve the previous factor.
 
 Run the host regression tests with:
 
@@ -183,20 +182,52 @@ tests/run-tests.sh
 This requires a C++11 compiler and no installed Arduino libraries.
 
 These tests cover decimal speech, button debounce and gesture timing (including
-clock rollover), immediate speech interruption, menu cycling, calibration, and
-sensor recovery. They complement the Nano compilation; they do not simulate the
-AVR audio interrupt, analogue noise, or load-cell accuracy. Compiler warnings from the current HX711
+clock rollover), immediate speech interruption, menu cycling, calibration,
+announcement modes, sensor recovery, and serial backpressure. EEPROM tests
+simulate interrupted and silently failed writes at each affected byte. They
+complement the Nano compilation; they do not simulate the AVR audio interrupt,
+analogue noise, or load-cell accuracy. Compiler warnings from the current HX711
 library and AVR core may appear with `--warnings all`.
 
 Before relying on a flashed scale, check speech quality and single/double/long
 presses while it speaks, including any click caused by cutting a word short.
 Calibrate with 5 g, verify several known loads including hundredths, test tare
 and a negative reading, and power-cycle to confirm the calibration is retained.
-Speaking hundredths does not establish 0.01 g physical
-accuracy; that also depends on the load cell, calibration, and mechanical setup.
+Speaking hundredths does not establish 0.01 g physical accuracy; that also
+depends on the load cell, calibration, and mechanical setup.
 
 Stability uses a full-window spread of at most 0.01 g (with a two-count minimum).
 Before calibration, a provisional 4096-count limit permits initial zeroing;
-calibration then checks both windows against the measured grams-per-count
-relationship. The limits in `ScaleFilter.h` and `CalibrationCheck.h` should be
+calibration then checks both windows against the measured calibration factor. The limits in `ScaleFilter.h` and `CalibrationCheck.h` should be
 checked against USB sample logs. The software never adjusts zero automatically.
+
+
+## USB diagnostics
+
+Open a serial terminal at 9600 baud and send lowercase commands terminated by
+newline (CRLF is also accepted):
+
+| Command | Result |
+| --- | --- |
+| `help` | List commands |
+| `status` or `raw` | One diagnostic snapshot |
+| `stream on` | Enable snapshots at up to 5 Hz |
+| `stream off` | Stop streaming and return a final snapshot |
+
+Snapshots contain `raw`, filtered `mean`, grams (`g`), filtered peak-to-peak noise
+(`spread`, raw counts), `stable`, zero offset (`zero`), `net` counts after zero,
+calibration `factor`, measurement validity (`valid`), operation (`op`), sensor
+`fault`, speech `mode`, and sample age (`age`, milliseconds). Grams are `na` when
+there is no valid weighing window. `net` shows zero drift only while the platform
+is empty; with a load it represents the load signal.
+
+Operation codes are 0 startup zero, 1 weighing, 2 user zero, 3 calibration zero,
+4 calibration prompt, 5 placement wait, 6 reference measurement, and 7 pending
+calibration save. Fault codes are 0 healthy, 1 conversion timeout, 2 clipping.
+Mode codes are 0 Repeat, 1 Change, 2 Manual.
+
+Diagnostics are read-only and silent until requested. Streaming sends snapshots,
+not every ADC conversion. Input processing and output draining are bounded per
+loop; a full output buffer cannot block the button, speech or sensor polling.
+Requests may be coalesced while output is busy. Oversized and unknown commands
+are rejected, and all buffers have fixed sizes.

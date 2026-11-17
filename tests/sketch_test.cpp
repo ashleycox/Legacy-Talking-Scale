@@ -29,6 +29,7 @@ int digitalRead(uint8_t pin) {
 void advance(unsigned long duration) {
   for (unsigned long i = 0; i < duration; ++i) {
     ++testMillis;
+    Serial.advance();
     loop();
   }
 }
@@ -438,6 +439,47 @@ void testClippedSensor() {
   assert(latestReading == 0.0f);
 }
 
+void testConsole() {
+  boot();
+  announcements.setMode(AnnouncementMode::Manual);
+  Serial.send("help\nstatus\n");
+  advance(500);
+  assert(Serial.output.find("raw=") != std::string::npos);
+  assert(Serial.output.find("factor=1000") != std::string::npos);
+  assert(Serial.output.find("mode=2") != std::string::npos);
+  Serial.send("stream on\n");
+  advance(500);
+  assert(diagnosticStream);
+  // A stopped output port must not block a hold, speech or sampling.
+  Serial.space = 0;
+  testButtonLevel = LOW;
+  for (int i = 0; i < 1100; ++i) {
+    ++testMillis;
+    Serial.send("status\nstatus\nstatus\n");
+    loop();
+  }
+  assert(menu);
+  assert(Serial.space == 0);
+  testButtonLevel = HIGH;
+  Serial.input.clear();
+  Serial.send("\nstream off\n");
+  advance(500);
+  assert(!diagnosticStream);
+  assertOldCalibration();
+  // A finite but unusably small legacy factor can overflow converted grams.
+  scale.set_scale(1.0e-38f);
+  scale.raw = 2000;
+  menu = false;
+  advance(3000);
+  assert(!isfinite(latestReading));
+  until([] { return !console.pending(); });
+  Serial.output.clear();
+  Serial.send("status\n");
+  advance(500);
+  assert(Serial.output.find("g=na") != std::string::npos);
+  assert(Serial.output.find("valid=0") != std::string::npos);
+}
+
 void testRequestSurvivesClip() {
   boot();
   announcements.setMode(AnnouncementMode::Manual);
@@ -469,6 +511,7 @@ int main(int argc, char **argv) {
   else if (std::strcmp(scenario, "unstable-tare") == 0) testUnstableTare();
   else if (std::strcmp(scenario, "modes") == 0) testAnnouncementModes();
   else if (std::strcmp(scenario, "clipping") == 0) testClippedSensor();
+  else if (std::strcmp(scenario, "console") == 0) testConsole();
   else if (std::strcmp(scenario, "clip-request") == 0) testRequestSurvivesClip();
   else if (std::strcmp(scenario, "phrase-bound") == 0) testPhraseBound();
   else testInvalidEEPROM(scenario);
